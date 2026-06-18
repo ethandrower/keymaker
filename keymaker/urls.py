@@ -22,6 +22,9 @@ urlpatterns = [
 
     # Environment + target management (admin)
     path("environments/new", views.environment_create, name="environment_create"),
+    path("environments/<slug:slug>/archive", views.environment_archive, name="environment_archive"),
+    path("environments/<slug:slug>/restore", views.environment_restore, name="environment_restore"),
+    path("environments/<slug:slug>/delete", views.environment_delete, name="environment_delete"),
     path("environments/<slug:slug>/targets/save", views.target_save, name="target_save"),
     path("environments/<slug:slug>/targets/<int:target_id>/delete", views.target_delete, name="target_delete"),
 

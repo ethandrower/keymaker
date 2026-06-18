@@ -64,6 +64,17 @@
           <button type="submit">+ Add</button>
         </form>
       {% endif %}
+
+      {% if archived_environments %}
+        <details class="archived-envs">
+          <summary>Archived ({{ archived_environments|length }})</summary>
+          <ul class="env-tabs">
+            {% for e in archived_environments %}
+              <li><a href="{% url 'environment_detail' e.slug %}" class="env-tab muted">{{ e.name }}</a></li>
+            {% endfor %}
+          </ul>
+        </details>
+      {% endif %}
     </aside>
     {% endblock %}
 

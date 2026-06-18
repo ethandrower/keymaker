@@ -35,6 +35,10 @@ class Environment(models.Model):
     revision = models.PositiveIntegerField(default=1)
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
+    # Soft hide — archived envs drop out of the sidebar/list but are restorable.
+    archived = models.BooleanField(default=False)
+    archived_at = models.DateTimeField(null=True, blank=True)
+    archived_by = models.CharField(max_length=150, blank=True)
 
     class Meta:
         ordering = ["name"]

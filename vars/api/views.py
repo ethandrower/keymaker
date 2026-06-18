@@ -35,9 +35,12 @@ class EnvironmentsView(APIView):
     """List environments, or create one (idempotent by slug)."""
 
     def get(self, request):
+        qs = Environment.objects.all()
+        if request.query_params.get("include_archived") != "1":
+            qs = qs.filter(archived=False)
         return Response({"environments": [
-            {"slug": e.slug, "name": e.name, "revision": e.revision}
-            for e in Environment.objects.all()
+            {"slug": e.slug, "name": e.name, "revision": e.revision, "archived": e.archived}
+            for e in qs
         ]})
 
     def post(self, request):

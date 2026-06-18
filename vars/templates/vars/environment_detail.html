@@ -3,10 +3,28 @@
 {% block content %}
 <div class="env-header">
   <div>
-    <h2>{{ env.name }} <span class="muted small">/ {{ env.slug }}</span></h2>
+    <h2>{{ env.name }} <span class="muted small">/ {{ env.slug }}</span>
+      {% if env.archived %}<span class="badge unused">archived</span>{% endif %}</h2>
+    {% if env.archived %}<p class="msg error" style="display:inline-block">Archived by {{ env.archived_by }} on {{ env.archived_at|date:"Y-m-d" }} — hidden from the sidebar; restore to use it again.</p>{% endif %}
     {% if env.description %}<p class="muted">{{ env.description }}</p>{% endif %}
   </div>
   <div class="env-meta" x-data="{ managed: false, dlTarget: '' }">
+    {% if user.is_admin %}
+      {% if env.archived %}
+        <form method="post" action="{% url 'environment_restore' env.slug %}" style="display:inline">
+          {% csrf_token %}<button class="btn small primary">↩ Restore env</button>
+        </form>
+      {% else %}
+        <form method="post" action="{% url 'environment_archive' env.slug %}" style="display:inline"
+              onsubmit="return confirm('Archive {{ env.name|escapejs }}? It hides from the sidebar but stays restorable.')">
+          {% csrf_token %}<button class="btn small">Archive env</button>
+        </form>
+        <form method="post" action="{% url 'environment_delete' env.slug %}" style="display:inline"
+              onsubmit="return confirm('PERMANENTLY delete {{ env.name|escapejs }} and all {{ env.variables.count }} variable(s) + {{ env.targets.count }} target(s)? This cannot be undone.')">
+          {% csrf_token %}<button class="btn small danger">Delete env</button>
+        </form>
+      {% endif %}
+    {% endif %}
     <span class="pill">rev {{ env.revision }}</span>
     <span class="pill">{{ env.get_kind_display }}</span>
     {% if targets %}

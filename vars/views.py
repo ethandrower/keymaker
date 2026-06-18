@@ -5,6 +5,7 @@ from django.conf import settings
 from django.contrib import messages
 from django.http import HttpResponse, HttpResponseForbidden
 from django.shortcuts import get_object_or_404, redirect, render
+from django.utils import timezone
 from django.utils.text import slugify
 from django.views.decorators.http import require_POST
 
@@ -38,7 +39,8 @@ def admin_required(view):
 
 
 def _nav_environments():
-    return Environment.objects.all()
+    """Active (non-archived) environments — what the sidebar shows."""
+    return Environment.objects.filter(archived=False)
 
 
 # --- auth views -----------------------------------------------------------
@@ -237,6 +239,47 @@ def environment_create(request):
     if created:
         AuditLog.record(actor=request.appuser.username, action="env_create", environment=slug)
     return redirect("environment_detail", slug=env.slug)
+
+
+@admin_required
+@require_POST
+def environment_archive(request, slug):
+    """Soft-hide an environment (restorable)."""
+    env = get_object_or_404(Environment, slug=slug)
+    env.archived = True
+    env.archived_at = timezone.now()
+    env.archived_by = request.appuser.username
+    env.save(update_fields=["archived", "archived_at", "archived_by"])
+    AuditLog.record(actor=request.appuser.username, action="env_archive", environment=slug)
+    messages.success(request, f"Archived environment {env.name} (restorable).")
+    first = _nav_environments().first()
+    return redirect("environment_detail", slug=first.slug) if first else redirect("home")
+
+
+@admin_required
+@require_POST
+def environment_restore(request, slug):
+    env = get_object_or_404(Environment, slug=slug)
+    env.archived = False
+    env.archived_at = None
+    env.archived_by = ""
+    env.save(update_fields=["archived", "archived_at", "archived_by"])
+    AuditLog.record(actor=request.appuser.username, action="env_restore", environment=slug)
+    return redirect("environment_detail", slug=env.slug)
+
+
+@admin_required
+@require_POST
+def environment_delete(request, slug):
+    """Hard delete — removes the environment and all its targets/variables."""
+    env = get_object_or_404(Environment, slug=slug)
+    name, nv, nt = env.name, env.variables.count(), env.targets.count()
+    env.delete()
+    AuditLog.record(actor=request.appuser.username, action="env_delete", environment=slug,
+                    detail=f"{name} (+{nv} vars, {nt} targets)")
+    messages.success(request, f"Permanently deleted {name} ({nv} variables, {nt} targets).")
+    first = _nav_environments().first()
+    return redirect("environment_detail", slug=first.slug) if first else redirect("home")
 
 
 @admin_required
