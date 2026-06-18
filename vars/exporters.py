@@ -13,10 +13,15 @@ def dotenv_quote(value: str) -> str:
     return value
 
 
-def render_dotenv(env, *, include_managed=False) -> str:
-    """Return the environment's live variables as `.env` text (KEY=value lines)."""
-    qs = env.active_vars()
+def render_dotenv(env, *, target=None, include_managed=False) -> str:
+    """Return the environment's resolved variables as `.env` text (KEY=value lines).
+
+    With `target`, returns the base (all-targets) values overlaid with that target's
+    overrides. Without a target, returns only the all-targets base.
+    """
+    resolved = env.resolved_for(target)
+    variables = sorted(resolved.values(), key=lambda v: v.key)
     if not include_managed:
-        qs = qs.exclude(is_managed=True)
-    lines = [f"{v.key}={dotenv_quote(v.value)}" for v in qs]
+        variables = [v for v in variables if not v.is_managed]
+    lines = [f"{v.key}={dotenv_quote(v.value)}" for v in variables]
     return "\n".join(lines) + ("\n" if lines else "")

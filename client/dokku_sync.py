@@ -29,6 +29,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 ALWAYS_IGNORE = {"DATABASE_URL", "REDIS_URL", "PORT", "DOKKU_PROXY_PORT_MAP"}
@@ -51,9 +52,13 @@ def get_revision(base, env, token):
     return json.loads(body)["revision"]
 
 
-def get_variables(base, env, token):
-    """Return desired {KEY: VALUE} (managed keys already excluded server-side)."""
-    body, _ = http_get(f"{base}/api/v1/environments/{env}/variables", token)
+def get_variables(base, env, token, target=None):
+    """Return desired {KEY: VALUE} resolved for this target (base + overrides).
+    Managed keys are excluded server-side."""
+    url = f"{base}/api/v1/environments/{env}/variables"
+    if target:
+        url += "?target=" + urllib.parse.quote(target)
+    body, _ = http_get(url, token)
     return json.loads(body)["variables"]
 
 
@@ -158,7 +163,8 @@ def sync_once(args):
         return
 
     print(f"[{env}] revision {last_rev} → {remote_rev}; syncing app '{args.app}'")
-    desired = get_variables(base, env, args.key)
+    # Resolve for this target so per-target overrides win (defaults to the app name).
+    desired = get_variables(base, env, args.key, target=args.target or args.app)
     current = dokku_current_config(args.dokku_bin, args.app)
     to_set, to_unset = compute_changes(desired, current, ignore)
     changed = apply_changes(args.dokku_bin, args.app, to_set, to_unset, args.restart, args.dry_run)
@@ -180,6 +186,8 @@ def main():
     p.add_argument("--key", default=cfg("KEYMAKER_KEY"), help="Keymaker key (env: KEYMAKER_KEY)")
     p.add_argument("--env", default=cfg("KEYMAKER_ENV"), help="environment slug to sync (env: KEYMAKER_ENV)")
     p.add_argument("--app", default=cfg("DOKKU_APP"), help="target Dokku app name (env: DOKKU_APP)")
+    p.add_argument("--target", default=cfg("KEYMAKER_TARGET"),
+                   help="Keymaker target to resolve overrides for (label/dokku_app; default: --app)")
     p.add_argument("--dokku-bin", default=cfg("DOKKU_BIN", "dokku"), help="path to dokku (default: dokku)")
     p.add_argument("--restart", action="store_true", default=cfg("SYNC_RESTART", "1") == "1",
                    help="restart the app after changes (default: on)")

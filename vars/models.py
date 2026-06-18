@@ -49,8 +49,20 @@ class Environment(models.Model):
         self.refresh_from_db(fields=["revision"])
 
     def active_vars(self):
-        """Live (non-archived) variables — what the UI, exports, and API serve."""
+        """All live (non-archived) variables — what the UI variable table shows."""
         return self.variables.filter(archived=False)
+
+    def resolved_for(self, target=None):
+        """The effective key→Variable mapping for one target (or all-targets base).
+
+        Base = variables scoped to all targets (target is NULL). If `target` is
+        given, its target-specific variables override the base for matching keys.
+        """
+        resolved = {v.key: v for v in self.active_vars().filter(target__isnull=True)}
+        if target is not None:
+            for v in self.active_vars().filter(target=target):
+                resolved[v.key] = v  # target-specific overrides the base
+        return resolved
 
 
 class Target(models.Model):
@@ -77,6 +89,15 @@ class Variable(models.Model):
     is_managed = models.BooleanField(
         default=False, help_text="Managed externally (e.g. by Dokku); read-only, excluded from sync"
     )
+    # Scope: which target this value applies to. NULL = all targets (the base value);
+    # a target-specific row overrides the base for that one target.
+    target = models.ForeignKey(
+        Target, null=True, blank=True, on_delete=models.CASCADE, related_name="variables",
+        help_text="Blank = applies to all targets; set = overrides the base for that target only",
+    )
+    # Free-text label for visually grouping variables within an environment
+    # (e.g. "Django app", "Mail", "Scraping"). Blank = ungrouped.
+    group = models.CharField(max_length=80, blank=True)
     updated_by = models.CharField(max_length=150, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -97,18 +118,28 @@ class Variable(models.Model):
     archived_reason = models.CharField(max_length=400, blank=True)
 
     class Meta:
-        ordering = ["key"]
-        # Only one ACTIVE variable per key; archived rows with the same key are allowed.
+        ordering = ["group", "key"]
+        # One ACTIVE variable per (key, scope); archived rows may repeat. Two partial
+        # constraints because NULL targets are "distinct" in a plain unique index.
         constraints = [
             models.UniqueConstraint(
                 fields=["environment", "key"],
-                condition=Q(archived=False),
-                name="uniq_active_env_key",
-            )
+                condition=Q(archived=False, target__isnull=True),
+                name="uniq_active_env_key_alltargets",
+            ),
+            models.UniqueConstraint(
+                fields=["environment", "target", "key"],
+                condition=Q(archived=False, target__isnull=False),
+                name="uniq_active_env_target_key",
+            ),
         ]
 
     def __str__(self):
         return f"{self.environment.slug}:{self.key}"
+
+    @property
+    def scope_label(self) -> str:
+        return self.target.label if self.target_id else "All targets"
 
     @property
     def value(self) -> str:

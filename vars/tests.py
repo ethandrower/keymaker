@@ -5,7 +5,7 @@ from rest_framework.test import APIClient
 from cryptography.fernet import Fernet
 
 from . import crypto
-from .models import Environment, Variable
+from .models import Environment, Target, Variable
 
 TEST_KEY = Fernet.generate_key().decode()
 API_KEY = "test-keymaker-key"
@@ -46,6 +46,7 @@ class ApiTests(TestCase):
         m = Variable(environment=self.env, key="DATABASE_URL", is_managed=True)
         m.set_value("postgres://x")
         m.save()
+        self.box = Target.objects.create(environment=self.env, label="boxA", dokku_app="app-a")
 
     def _client(self, key=API_KEY):
         c = APIClient()
@@ -101,7 +102,7 @@ class ApiTests(TestCase):
         self.assertNotIn("SECRET_KEY", body)
 
     def test_archived_and_active_can_share_key(self):
-        v = self.env.variables.get(key="SECRET_KEY")
+        v = self.env.variables.get(key="SECRET_KEY", target__isnull=True)
         v.archive(by="tester", reason="rotated")
         resp = self._client().put(
             "/api/v1/environments/staging/variables/SECRET_KEY",
@@ -110,6 +111,41 @@ class ApiTests(TestCase):
         self.assertEqual(resp.status_code, 201)
         self.assertEqual(self.env.active_vars().filter(key="SECRET_KEY").count(), 1)
         self.assertEqual(self.env.variables.filter(key="SECRET_KEY").count(), 2)
+
+    # --- target scope ---
+
+    def test_target_override_wins_per_target_but_not_base(self):
+        c = self._client()
+        c.put("/api/v1/environments/staging/variables/SITE_URL",
+              {"value": "base", "is_secret": False}, format="json")
+        c.put("/api/v1/environments/staging/variables/SITE_URL",
+              {"value": "for-boxA", "is_secret": False, "target": "boxA"}, format="json")
+        base = c.get("/api/v1/environments/staging/variables?format=dotenv").content.decode()
+        self.assertIn("SITE_URL=base", base)
+        boxa = c.get("/api/v1/environments/staging/variables?format=dotenv&target=boxA").content.decode()
+        self.assertIn("SITE_URL=for-boxA", boxa)
+        # Two distinct rows coexist (base + override) under the partial unique constraints.
+        self.assertEqual(self.env.active_vars().filter(key="SITE_URL").count(), 2)
+
+    def test_target_matches_by_dokku_app(self):
+        c = self._client()
+        c.put("/api/v1/environments/staging/variables/SITE_URL",
+              {"value": "for-boxA", "is_secret": False, "target": "app-a"}, format="json")
+        # resolve by the dokku_app identifier too
+        boxa = c.get("/api/v1/environments/staging/variables?format=dotenv&target=app-a").content.decode()
+        self.assertIn("SITE_URL=for-boxA", boxa)
+
+    def test_unknown_target_404(self):
+        self.assertEqual(
+            self._client().get("/api/v1/environments/staging/variables?target=nope").status_code,
+            404,
+        )
+
+    def test_resolved_for_model_helper(self):
+        base = Variable(environment=self.env, key="X"); base.set_value("b"); base.save()
+        ov = Variable(environment=self.env, key="X", target=self.box); ov.set_value("o"); ov.save()
+        self.assertEqual(self.env.resolved_for(None)["X"].value, "b")
+        self.assertEqual(self.env.resolved_for(self.box)["X"].value, "o")
 
 
 class SyncDiffTests(TestCase):

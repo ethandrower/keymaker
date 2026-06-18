@@ -79,6 +79,9 @@ th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: upp
 .badge.secret { color: var(--secret); border-color: var(--secret); }
 .badge.managed { color: var(--warn); border-color: var(--warn); }
 .badge.unused { color: var(--danger); border-color: var(--danger); cursor: help; }
+.badge.target { color: var(--accent); border-color: var(--accent); }
+.vars-table tr.group-head td { background: var(--panel); color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; padding-top: 14px; }
+.vars-table td.scope { white-space: nowrap; }
 
 /* Var editor */
 .var-editor { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-bottom: 12px; }

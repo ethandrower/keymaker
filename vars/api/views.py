@@ -10,7 +10,25 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from ..exporters import render_dotenv
-from ..models import AuditLog, Environment, Variable
+from ..models import AuditLog, Environment, Target, Variable
+
+
+class TargetNotFound(Exception):
+    pass
+
+
+def _resolve_target(env, ident):
+    """Map a ?target= / body 'target' identifier to a Target in this env.
+
+    Matches by label, dokku_app, or numeric id. Empty/None → None (all-targets).
+    Raises TargetNotFound if a non-empty identifier matches nothing.
+    """
+    if not ident:
+        return None
+    for t in env.targets.all():
+        if ident in (t.label, t.dokku_app, str(t.id)):
+            return t
+    raise TargetNotFound(ident)
 
 
 class RevisionView(APIView):
@@ -28,28 +46,35 @@ class VariablesView(APIView):
 
     def get(self, request, slug):
         env = get_object_or_404(Environment, slug=slug)
+        try:
+            target = _resolve_target(env, request.query_params.get("target"))
+        except TargetNotFound as exc:
+            return Response({"detail": f"No target '{exc}' in {env.slug}."},
+                            status=status.HTTP_404_NOT_FOUND)
 
         include_managed = request.query_params.get("include_managed") == "1"
-        qs = env.active_vars()
+        # Resolved for the target (base all-targets values + that target's overrides).
+        resolved = env.resolved_for(target)
+        variables = sorted(resolved.values(), key=lambda v: v.key)
         if not include_managed:
-            qs = qs.exclude(is_managed=True)
-        pairs = [(v.key, v.value) for v in qs]
+            variables = [v for v in variables if not v.is_managed]
 
         AuditLog.record(
             actor=str(request.user), action="api_read", environment=env.slug,
-            detail=f"{len(pairs)} vars",
+            detail=f"{len(variables)} vars" + (f" for {target.label}" if target else " (all targets)"),
         )
 
         fmt = request.query_params.get("format")
         if fmt == "dotenv":
-            body = render_dotenv(env, include_managed=include_managed)
+            body = render_dotenv(env, target=target, include_managed=include_managed)
             resp = HttpResponse(body, content_type="text/plain; charset=utf-8")
         else:
             resp = Response(
                 {
                     "slug": env.slug,
                     "revision": env.revision,
-                    "variables": {k: val for k, val in pairs},
+                    "target": target.label if target else None,
+                    "variables": {v.key: v.value for v in variables},
                 }
             )
         resp["ETag"] = f'"{env.revision}"'
@@ -58,41 +83,58 @@ class VariablesView(APIView):
 
 class VariableDetailView(APIView):
     def put(self, request, slug, key):
+        """Upsert a key at a scope. Body: value, is_secret, optional `target`
+        (label/dokku_app/id; omit for all-targets) and `group` label."""
         env = get_object_or_404(Environment, slug=slug)
         if key in settings.KEYMAKER_MANAGED_KEYS:
             return Response(
                 {"detail": f"{key} is a managed key and cannot be set here."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        try:
+            target = _resolve_target(env, request.data.get("target"))
+        except TargetNotFound as exc:
+            return Response({"detail": f"No target '{exc}' in {env.slug}."},
+                            status=status.HTTP_404_NOT_FOUND)
+
         value = request.data.get("value", "")
         is_secret = bool(request.data.get("is_secret", True))
-        # Operate on the active row; archived rows with the same key are left alone.
-        var = env.active_vars().filter(key=key).first()
+        # Match the active row at this exact scope; archived rows are left alone.
+        var = env.active_vars().filter(key=key, target=target).first()
         created = var is None
         if created:
-            var = Variable(environment=env, key=key)
+            var = Variable(environment=env, key=key, target=target)
         if var.is_managed:
             return Response(
                 {"detail": "Managed variable is read-only."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         var.is_secret = is_secret
+        if "group" in request.data:
+            var.group = (request.data.get("group") or "")[:80]
         var.set_value(value)
         var.updated_by = str(request.user)
         var.save()
         env.bump_revision()
         AuditLog.record(
             actor=str(request.user), action="api_create" if created else "api_update",
-            environment=env.slug, key=key, detail="(secret)" if is_secret else value[:120],
+            environment=env.slug, key=key,
+            detail=("(secret)" if is_secret else value[:120]) + f" [{var.scope_label}]",
         )
         return Response(
-            {"key": key, "created": created, "revision": env.revision},
+            {"key": key, "target": target.label if target else None,
+             "created": created, "revision": env.revision},
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
 
     def delete(self, request, slug, key):
         env = get_object_or_404(Environment, slug=slug)
-        var = env.active_vars().filter(key=key).first()
+        try:
+            target = _resolve_target(env, request.data.get("target"))
+        except TargetNotFound as exc:
+            return Response({"detail": f"No target '{exc}' in {env.slug}."},
+                            status=status.HTTP_404_NOT_FOUND)
+        var = env.active_vars().filter(key=key, target=target).first()
         if not var:
             return Response(status=status.HTTP_404_NOT_FOUND)
         if var.is_managed:
@@ -106,7 +148,7 @@ class VariableDetailView(APIView):
         env.bump_revision()
         AuditLog.record(
             actor=str(request.user), action="api_archive", environment=env.slug,
-            key=key, detail=reason,
+            key=key, detail=f"{reason} [{var.scope_label}]",
         )
         return Response(status=status.HTTP_204_NO_CONTENT)
 

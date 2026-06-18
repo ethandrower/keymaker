@@ -1,50 +1,64 @@
-{% comment %}Renders the <tbody> of the variables table. Swapped in by HTMX after edits.{% endcomment %}
+{% comment %}<tbody> of the variables table: grouped by label, with a Scope column.
+Swapped in by HTMX after edits. `variables` is ordered by (group, key).{% endcomment %}
+{% load static %}
 <tbody id="var-rows">
-  {% for v in variables %}
-    <tr x-data="{ revealed: false, value: '' }">
-      <td class="key">
-        {{ v.key }}
-        {% if v.is_managed %}<span class="badge managed">managed</span>{% endif %}
-        {% if v.is_secret %}<span class="badge secret">secret</span>{% endif %}
-        {% if v.suspected_unused %}<span class="badge unused" title="{{ v.audit_note }} — last seen {{ v.last_seen_at|default:'never' }}">⚠ unused?</span>{% endif %}
-      </td>
-      <td class="value">
-        {% if v.is_secret %}
-          <span x-show="!revealed" class="masked">••••••••</span>
-          <code x-show="revealed" x-text="value" class="revealed-value"></code>
-          <button class="icon-btn"
-                  @click="if(!revealed){ value = await (await fetch('{% url 'variable_reveal' env.slug v.id %}')).text(); } revealed = !revealed"
-                  :title="revealed ? 'Hide' : 'Reveal'">
-            <span x-text="revealed ? '🙈' : '👁'"></span>
-          </button>
-          <button class="icon-btn"
-                  @click="let val = revealed ? value : await (await fetch('{% url 'variable_reveal' env.slug v.id %}')).text(); navigator.clipboard.writeText(val); $el.textContent='✓'; setTimeout(()=>$el.textContent='📋',1000)"
-                  title="Copy">📋</button>
-        {% else %}
-          <code>{{ v.value }}</code>
-          <button class="icon-btn"
-                  @click="navigator.clipboard.writeText('{{ v.value|escapejs }}'); $el.textContent='✓'; setTimeout(()=>$el.textContent='📋',1000)"
-                  title="Copy">📋</button>
-        {% endif %}
-      </td>
-      {% if user.is_admin %}
-        <td class="actions">
-          {% if not v.is_managed %}
-            <button class="btn small"
-                    @click="$dispatch('edit-var', {id: {{ v.id }}, key: '{{ v.key|escapejs }}', is_secret: {{ v.is_secret|yesno:'true,false' }} })">Edit</button>
-            <form method="post" action="{% url 'variable_archive' env.slug v.id %}" style="display:inline"
-                  onsubmit="var r=prompt('Archive {{ v.key|escapejs }} — reason? (kept & restorable)'); if(r===null){return false;} this.reason.value=r;">
-              {% csrf_token %}
-              <input type="hidden" name="reason">
-              <button class="btn small danger" type="submit">Archive</button>
-            </form>
+  {% regroup variables by group as grouped %}
+  {% for grp in grouped %}
+    {% if grouped|length > 1 or grp.grouper %}
+      <tr class="group-head">
+        <td colspan="{% if user.is_admin %}4{% else %}3{% endif %}">
+          {{ grp.grouper|default:"Ungrouped" }}
+        </td>
+      </tr>
+    {% endif %}
+    {% for v in grp.list %}
+      <tr x-data="{ revealed: false, value: '' }">
+        <td class="key">
+          {{ v.key }}
+          {% if v.is_managed %}<span class="badge managed">managed</span>{% endif %}
+          {% if v.is_secret %}<span class="badge secret">secret</span>{% endif %}
+          {% if v.suspected_unused %}<span class="badge unused" title="{{ v.audit_note }} — last seen {{ v.last_seen_at|default:'never' }}">⚠ unused?</span>{% endif %}
+        </td>
+        <td class="value">
+          {% if v.is_secret %}
+            <span x-show="!revealed" class="masked">••••••••</span>
+            <code x-show="revealed" x-text="value" class="revealed-value"></code>
+            <button class="icon-btn"
+                    @click="if(!revealed){ value = await (await fetch('{% url 'variable_reveal' env.slug v.id %}')).text(); } revealed = !revealed"
+                    :title="revealed ? 'Hide' : 'Reveal'"><span x-text="revealed ? '🙈' : '👁'"></span></button>
+            <button class="icon-btn"
+                    @click="let val = revealed ? value : await (await fetch('{% url 'variable_reveal' env.slug v.id %}')).text(); navigator.clipboard.writeText(val); $el.textContent='✓'; setTimeout(()=>$el.textContent='📋',1000)"
+                    title="Copy">📋</button>
           {% else %}
-            <span class="muted small">read-only</span>
+            <code>{{ v.value }}</code>
+            <button class="icon-btn"
+                    @click="navigator.clipboard.writeText('{{ v.value|escapejs }}'); $el.textContent='✓'; setTimeout(()=>$el.textContent='📋',1000)"
+                    title="Copy">📋</button>
           {% endif %}
         </td>
-      {% endif %}
-    </tr>
+        <td class="scope">
+          {% if v.target_id %}<span class="badge target">{{ v.target.label }}</span>
+          {% else %}<span class="muted small">all targets</span>{% endif %}
+        </td>
+        {% if user.is_admin %}
+          <td class="actions">
+            {% if not v.is_managed %}
+              <button class="btn small"
+                      @click="$dispatch('edit-var', {id: {{ v.id }}, key: '{{ v.key|escapejs }}', is_secret: {{ v.is_secret|yesno:'true,false' }}, target: '{{ v.target_id|default_if_none:'' }}', group: '{{ v.group|escapejs }}' })">Edit</button>
+              <form method="post" action="{% url 'variable_archive' env.slug v.id %}" style="display:inline"
+                    onsubmit="var r=prompt('Archive {{ v.key|escapejs }} [{{ v.scope_label|escapejs }}] — reason? (kept & restorable)'); if(r===null){return false;} this.reason.value=r;">
+                {% csrf_token %}
+                <input type="hidden" name="reason">
+                <button class="btn small danger" type="submit">Archive</button>
+              </form>
+            {% else %}
+              <span class="muted small">read-only</span>
+            {% endif %}
+          </td>
+        {% endif %}
+      </tr>
+    {% endfor %}
   {% empty %}
-    <tr><td colspan="{% if user.is_admin %}3{% else %}2{% endif %}" class="muted">No variables yet.</td></tr>
+    <tr><td colspan="{% if user.is_admin %}4{% else %}3{% endif %}" class="muted">No variables yet.</td></tr>
   {% endfor %}
 </tbody>

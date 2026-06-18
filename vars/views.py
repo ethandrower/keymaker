@@ -79,9 +79,18 @@ def home(request):
     return render(request, "vars/home.html", {"environments": envs, "user": request.appuser})
 
 
+def _env_target(env, ident):
+    """Resolve a target id/label for UI views; None for all-targets/blank."""
+    if not ident:
+        return None
+    return env.targets.filter(id=ident).first() if str(ident).isdigit() else \
+        env.targets.filter(label=ident).first()
+
+
 @login_required
 def environment_detail(request, slug):
     env = get_object_or_404(Environment, slug=slug)
+    # active_vars() is ordered by (group, key) so the template can {% regroup %}.
     return render(
         request,
         "vars/environment_detail.html",
@@ -89,6 +98,7 @@ def environment_detail(request, slug):
             "environments": _nav_environments(),
             "env": env,
             "variables": env.active_vars(),
+            "targets": env.targets.all(),
             "archived": env.variables.filter(archived=True),
             "user": request.appuser,
             "managed_keys": settings.KEYMAKER_MANAGED_KEYS,
@@ -98,17 +108,20 @@ def environment_detail(request, slug):
 
 @login_required
 def environment_download(request, slug):
-    """Download the environment's variables as a .env file (logged)."""
+    """Download the environment's resolved variables as a .env file (logged)."""
     env = get_object_or_404(Environment, slug=slug)
     include_managed = request.GET.get("include_managed") == "1"
-    body = exporters.render_dotenv(env, include_managed=include_managed)
+    target = _env_target(env, request.GET.get("target"))
+    body = exporters.render_dotenv(env, target=target, include_managed=include_managed)
     count = body.count("\n") if body.strip() else 0
+    suffix = f"-{target.label}" if target else ""
     AuditLog.record(
         actor=request.appuser.username, action="download", environment=env.slug,
-        detail=f"{count} vars{' incl. managed' if include_managed else ''}",
+        detail=f"{count} vars{' incl. managed' if include_managed else ''}"
+               + (f" for {target.label}" if target else ""),
     )
     resp = HttpResponse(body, content_type="text/plain; charset=utf-8")
-    resp["Content-Disposition"] = f'attachment; filename="{env.slug}.env"'
+    resp["Content-Disposition"] = f'attachment; filename="{env.slug}{suffix}.env"'
     return resp
 
 
@@ -146,6 +159,8 @@ def variable_save(request, slug):
 
     var.key = key
     var.is_secret = is_secret
+    var.target = _env_target(env, request.POST.get("target"))  # blank = all targets
+    var.group = (request.POST.get("group") or "").strip()[:80]
     var.set_value(value)
     var.updated_by = request.appuser.username
     var.save()
@@ -155,7 +170,7 @@ def variable_save(request, slug):
         action=action,
         environment=env.slug,
         key=key,
-        detail="(secret)" if is_secret else value[:120],
+        detail=("(secret)" if is_secret else value[:120]) + f" [{var.scope_label}]",
     )
     return _render_var_rows(request, env)
 
@@ -184,8 +199,11 @@ def variable_restore(request, slug, var_id):
     """Un-archive a variable, unless an active one now holds that key."""
     env = get_object_or_404(Environment, slug=slug)
     var = get_object_or_404(Variable, id=var_id, environment=env, archived=True)
-    if env.active_vars().filter(key=var.key).exists():
-        messages.error(request, f"Can't restore {var.key}: an active variable already uses that key.")
+    if env.active_vars().filter(key=var.key, target=var.target).exists():
+        messages.error(
+            request,
+            f"Can't restore {var.key} [{var.scope_label}]: an active variable already uses that key/scope.",
+        )
         return redirect("environment_detail", slug=env.slug)
     var.restore()
     env.bump_revision()
