@@ -95,7 +95,7 @@ class Variable(models.Model):
         Target, null=True, blank=True, on_delete=models.CASCADE, related_name="variables",
         help_text="Blank = applies to all targets; set = overrides the base for that target only",
     )
-    # Free-text label for visually grouping variables within an environment
+    # Free-text label for visually sectioning variables within an environment
     # (e.g. "Django app", "Mail", "Scraping"). Blank = unlabeled.
     label = models.CharField(max_length=80, blank=True)
     updated_by = models.CharField(max_length=150, blank=True)

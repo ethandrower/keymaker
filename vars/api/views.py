@@ -31,6 +31,60 @@ def _resolve_target(env, ident):
     raise TargetNotFound(ident)
 
 
+class EnvironmentsView(APIView):
+    """List environments, or create one (idempotent by slug)."""
+
+    def get(self, request):
+        return Response({"environments": [
+            {"slug": e.slug, "name": e.name, "revision": e.revision}
+            for e in Environment.objects.all()
+        ]})
+
+    def post(self, request):
+        slug = (request.data.get("slug") or "").strip()
+        if not slug:
+            return Response({"detail": "slug is required."}, status=status.HTTP_400_BAD_REQUEST)
+        env, created = Environment.objects.get_or_create(
+            slug=slug,
+            defaults={"name": request.data.get("name") or slug,
+                      "kind": request.data.get("kind") or Environment.KIND_SHARED,
+                      "description": request.data.get("description", "")},
+        )
+        if created:
+            AuditLog.record(actor=str(request.user), action="env_create", environment=slug)
+        return Response({"slug": env.slug, "created": created},
+                        status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+class TargetsView(APIView):
+    """List or create targets for an environment (idempotent by label)."""
+
+    def get(self, request, slug):
+        env = get_object_or_404(Environment, slug=slug)
+        return Response({"targets": [
+            {"id": t.id, "label": t.label, "host": t.host, "dokku_app": t.dokku_app,
+             "domain": t.domain, "local_only": t.local_only} for t in env.targets.all()
+        ]})
+
+    def post(self, request, slug):
+        env = get_object_or_404(Environment, slug=slug)
+        label = (request.data.get("label") or "").strip()
+        if not label:
+            return Response({"detail": "label is required."}, status=status.HTTP_400_BAD_REQUEST)
+        target, created = env.targets.get_or_create(
+            label=label,
+            defaults={"host": request.data.get("host", ""),
+                      "dokku_app": request.data.get("dokku_app", ""),
+                      "domain": request.data.get("domain", ""),
+                      "local_only": bool(request.data.get("local_only", False))},
+        )
+        if created:
+            AuditLog.record(actor=str(request.user), action="target_add",
+                            environment=slug, detail=label)
+        return Response({"id": target.id, "label": target.label, "created": created},
+                        status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
 class RevisionView(APIView):
     """Cheap change-detection poll for the sync client."""
 

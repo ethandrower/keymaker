@@ -81,7 +81,7 @@ restart. (Trade-off: no per-agent revocation or scoping — deliberately simple 
 an internal tool. If you ever need per-user accountability, add an identity layer
 in front; the code path is intentionally minimal.)
 
-## Variable scope & groups
+## Variable scope & labels
 
 Each variable applies to **all targets** (the base value) or to **one target** (an
 override). When resolving config for a target, the target-specific value wins over
@@ -89,8 +89,8 @@ the base — so you keep a shared `SECRET_KEY` but give one box its own `SITE_UR
 Reads, exports, and the Dokku sync resolve per target via `?target=<label|dokku_app>`
 (the sync client defaults the target to the Dokku app name).
 
-Variables also carry an optional **group** label (e.g. "Django", "Mail") that
-sections the variable table for visual context — purely organizational.
+Variables also carry an optional **label** (e.g. "Django", "Mail") that sections
+the variable table for visual context — purely organizational, no ownership implied.
 
 ## Archive, never delete
 

@@ -5,7 +5,7 @@ Swapped in by HTMX after edits. `variables` is ordered by (label, key).{% endcom
   {% regroup variables by label as grouped %}
   {% for grp in grouped %}
     {% if grouped|length > 1 or grp.grouper %}
-      <tr class="group-head">
+      <tr class="label-head">
         <td colspan="{% if user.is_admin %}4{% else %}3{% endif %}">
           {{ grp.grouper|default:"Unlabeled" }}
         </td>
