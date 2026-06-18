@@ -5,9 +5,10 @@ from rest_framework.test import APIClient
 from cryptography.fernet import Fernet
 
 from . import crypto
-from .models import ApiToken, Environment, Variable
+from .models import Environment, Variable
 
 TEST_KEY = Fernet.generate_key().decode()
+API_KEY = "test-keymaker-key"
 
 
 @override_settings(KEYMAKER_MASTER_KEYS=[TEST_KEY])
@@ -33,7 +34,8 @@ class CryptoTests(TestCase):
         crypto._fernet = None
 
 
-@override_settings(KEYMAKER_MASTER_KEYS=[TEST_KEY], KEYMAKER_MANAGED_KEYS=["DATABASE_URL"])
+@override_settings(KEYMAKER_MASTER_KEYS=[TEST_KEY], KEYMAKER_MANAGED_KEYS=["DATABASE_URL"],
+                   KEYMAKER_KEY=API_KEY)
 class ApiTests(TestCase):
     def setUp(self):
         crypto._fernet = None
@@ -44,46 +46,36 @@ class ApiTests(TestCase):
         m = Variable(environment=self.env, key="DATABASE_URL", is_managed=True)
         m.set_value("postgres://x")
         m.save()
-        self.ro, self.ro_raw = ApiToken.issue(name="ro", environment=self.env)
-        self.rw, self.rw_raw = ApiToken.issue(name="rw", environment=self.env, can_write=True)
-        self.other = Environment.objects.create(slug="prod", name="Prod")
 
-    def _client(self, raw):
+    def _client(self, key=API_KEY):
         c = APIClient()
-        c.credentials(HTTP_AUTHORIZATION=f"Bearer {raw}")
+        c.credentials(HTTP_AUTHORIZATION=f"Bearer {key}")
         return c
 
-    def test_requires_token(self):
+    def test_requires_key(self):
         self.assertEqual(APIClient().get("/api/v1/environments/staging/revision").status_code, 401)
 
-    def test_managed_excluded_from_dotenv(self):
-        resp = self._client(self.ro_raw).get(
-            "/api/v1/environments/staging/variables?format=dotenv"
+    def test_wrong_key_rejected(self):
+        self.assertEqual(
+            self._client("nope").get("/api/v1/environments/staging/revision").status_code, 401
         )
+
+    def test_managed_excluded_from_dotenv(self):
+        resp = self._client().get("/api/v1/environments/staging/variables?format=dotenv")
         self.assertEqual(resp.status_code, 200)
         body = resp.content.decode()
         self.assertIn("SECRET_KEY=abc", body)
         self.assertNotIn("DATABASE_URL", body)
 
     def test_include_managed(self):
-        resp = self._client(self.ro_raw).get(
+        resp = self._client().get(
             "/api/v1/environments/staging/variables?format=dotenv&include_managed=1"
         )
         self.assertIn("DATABASE_URL", resp.content.decode())
 
-    def test_readonly_cannot_write(self):
-        resp = self._client(self.ro_raw).put(
-            "/api/v1/environments/staging/variables/FOO", {"value": "x"}, format="json"
-        )
-        self.assertEqual(resp.status_code, 403)
-
-    def test_scope_enforced(self):
-        resp = self._client(self.ro_raw).get("/api/v1/environments/prod/revision")
-        self.assertEqual(resp.status_code, 403)
-
     def test_write_bumps_revision(self):
         before = self.env.revision
-        resp = self._client(self.rw_raw).put(
+        resp = self._client().put(
             "/api/v1/environments/staging/variables/NEW", {"value": "v", "is_secret": False},
             format="json",
         )
@@ -92,27 +84,18 @@ class ApiTests(TestCase):
         self.assertEqual(self.env.revision, before + 1)
 
     def test_cannot_write_managed_key(self):
-        resp = self._client(self.rw_raw).put(
+        resp = self._client().put(
             "/api/v1/environments/staging/variables/DATABASE_URL", {"value": "x"}, format="json"
         )
         self.assertEqual(resp.status_code, 400)
 
-    def test_revoked_token_rejected(self):
-        self.ro.revoked = True
-        self.ro.save()
-        self.assertEqual(
-            self._client(self.ro_raw).get("/api/v1/environments/staging/revision").status_code,
-            401,
-        )
-
     def test_delete_archives_not_destroys(self):
-        resp = self._client(self.rw_raw).delete("/api/v1/environments/staging/variables/SECRET_KEY")
+        resp = self._client().delete("/api/v1/environments/staging/variables/SECRET_KEY")
         self.assertEqual(resp.status_code, 204)
         var = Variable.objects.get(environment=self.env, key="SECRET_KEY")
         self.assertTrue(var.archived)               # still in the DB
-        self.assertEqual(var.archived_by, "token:rw")
-        # excluded from the live list
-        body = self._client(self.ro_raw).get(
+        self.assertEqual(var.archived_by, "api")
+        body = self._client().get(
             "/api/v1/environments/staging/variables?format=dotenv"
         ).content.decode()
         self.assertNotIn("SECRET_KEY", body)
@@ -120,8 +103,7 @@ class ApiTests(TestCase):
     def test_archived_and_active_can_share_key(self):
         v = self.env.variables.get(key="SECRET_KEY")
         v.archive(by="tester", reason="rotated")
-        # A new active variable with the same key is now allowed.
-        resp = self._client(self.rw_raw).put(
+        resp = self._client().put(
             "/api/v1/environments/staging/variables/SECRET_KEY",
             {"value": "new", "is_secret": True}, format="json",
         )

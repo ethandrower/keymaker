@@ -1,8 +1,4 @@
 """Data model for the keymaker service."""
-import hashlib
-import secrets
-
-from django.conf import settings
 from django.db import models
 from django.db.models import Q
 from django.utils import timezone
@@ -11,9 +7,8 @@ from . import crypto
 
 
 class AppUser(models.Model):
-    """A person who can sign in to the UI (via Bitbucket OAuth, or the dev shortcut)."""
+    """The signed-in UI principal. Today there is one shared account ("team")."""
 
-    bitbucket_uuid = models.CharField(max_length=64, unique=True, null=True, blank=True)
     username = models.CharField(max_length=150, unique=True)
     display_name = models.CharField(max_length=255, blank=True)
     email = models.EmailField(blank=True)
@@ -137,44 +132,6 @@ class Variable(models.Model):
         self.archived_by = ""
         self.archived_reason = ""
         self.save(update_fields=["archived", "archived_at", "archived_by", "archived_reason"])
-
-
-class ApiToken(models.Model):
-    """A bearer token for agents / the Dokku sync client. Stored hashed."""
-
-    name = models.CharField(max_length=120)
-    token_hash = models.CharField(max_length=64, unique=True, db_index=True)
-    token_prefix = models.CharField(max_length=12, blank=True, help_text="First chars, for display")
-    environment = models.ForeignKey(
-        Environment, null=True, blank=True, on_delete=models.CASCADE,
-        help_text="Scope to one environment; blank = all environments",
-    )
-    can_write = models.BooleanField(default=False)
-    created_by = models.CharField(max_length=150, blank=True)
-    created_at = models.DateTimeField(default=timezone.now)
-    last_used_at = models.DateTimeField(null=True, blank=True)
-    revoked = models.BooleanField(default=False)
-
-    def __str__(self):
-        return self.name
-
-    @staticmethod
-    def hash_token(raw: str) -> str:
-        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-    @classmethod
-    def issue(cls, *, name, environment=None, can_write=False, created_by=""):
-        """Create a token and return (instance, raw_token). Raw is shown only once."""
-        raw = secrets.token_hex(20)  # 40-char hex, matching citemed_web's api_key style
-        token = cls.objects.create(
-            name=name,
-            token_hash=cls.hash_token(raw),
-            token_prefix=raw[:8],
-            environment=environment,
-            can_write=can_write,
-            created_by=created_by,
-        )
-        return token, raw
 
 
 class AuditLog(models.Model):

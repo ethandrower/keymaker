@@ -17,16 +17,14 @@ Two ways to run it — pick one (or both):
 
 ## Setup
 
-1. In the keymaker UI, issue a **read-only** API token scoped to the environment
-   this host runs (Tokens page).
-2. Copy `dokku_sync.py` to the host (e.g. `/usr/local/bin/`).
-3. Configure via env vars:
+1. Copy `dokku_sync.py` to the host (e.g. `/usr/local/bin/`).
+2. Configure via env vars:
 
 ```bash
 export KEYMAKER_URL=https://keymaker.citemed.com
-export KEYMAKER_TOKEN=<read-only token>
+export KEYMAKER_KEY=<the keymaker key>   # same key used to log into the UI
 export KEYMAKER_ENV=staging          # environment slug
-export DOKKU_APP=dev-ethan           # target dokku app
+export DOKKU_APP=dev-ada             # target dokku app
 # optional:
 export SYNC_RESTART=1                 # restart app after changes (default on)
 export SYNC_IGNORE=SOME_KEY,OTHER     # extra keys to never touch
@@ -96,7 +94,7 @@ the app deploy. Add to your `deploy*.yml`:
     cmd: python3 /usr/local/bin/dokku_sync.py --once --force
   environment:
     KEYMAKER_URL: "https://keymaker.citemed.com"
-    KEYMAKER_TOKEN: "{{ keymaker_token }}"   # from vault
+    KEYMAKER_KEY: "{{ keymaker_key }}"       # from vault
     KEYMAKER_ENV: "{{ keymaker_env }}"       # e.g. staging
     DOKKU_APP: "{{ dokku_app }}"             # e.g. dev-ethan
   delegate_to: "{{ dokku_host }}"

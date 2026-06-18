@@ -8,7 +8,7 @@ the server, and an extra local ignore-list is honored as a safety net.
 
 Config via environment variables (or flags):
   KEYMAKER_URL        base URL, e.g. https://keymaker.citemed.com
-  KEYMAKER_TOKEN      a read-only API token scoped to the environment
+  KEYMAKER_KEY        the Keymaker key (same one used to log into the UI)
   KEYMAKER_ENV        environment slug to sync, e.g. staging
   DOKKU_APP           target Dokku app name, e.g. dev-ethan
   DOKKU_BIN           path to dokku (default: dokku)
@@ -151,14 +151,14 @@ def sync_once(args):
         x.strip() for x in (cfg("SYNC_IGNORE", "") or "").split(",") if x.strip()
     )
 
-    remote_rev = get_revision(base, env, args.token)
+    remote_rev = get_revision(base, env, args.key)
     last_rev = load_state(env).get("revision")
     if remote_rev == last_rev and not args.force:
         print(f"[{env}] revision {remote_rev} unchanged — nothing to do")
         return
 
     print(f"[{env}] revision {last_rev} → {remote_rev}; syncing app '{args.app}'")
-    desired = get_variables(base, env, args.token)
+    desired = get_variables(base, env, args.key)
     current = dokku_current_config(args.dokku_bin, args.app)
     to_set, to_unset = compute_changes(desired, current, ignore)
     changed = apply_changes(args.dokku_bin, args.app, to_set, to_unset, args.restart, args.dry_run)
@@ -173,11 +173,11 @@ def main():
         description="Sync a Keymaker environment to a Dokku app via `dokku config:set`. "
                     "Run --once at deploy time, or --watch as a daemon. Managed keys "
                     "(DATABASE_URL, REDIS_URL) are never touched.",
-        epilog="Config can also come from env vars: KEYMAKER_URL, KEYMAKER_TOKEN, "
+        epilog="Config can also come from env vars: KEYMAKER_URL, KEYMAKER_KEY, "
                "KEYMAKER_ENV, DOKKU_APP, DOKKU_BIN, SYNC_RESTART, SYNC_IGNORE, STATE_FILE.",
     )
     p.add_argument("--url", default=cfg("KEYMAKER_URL"), help="Keymaker base URL (env: KEYMAKER_URL)")
-    p.add_argument("--token", default=cfg("KEYMAKER_TOKEN"), help="read-only API token (env: KEYMAKER_TOKEN)")
+    p.add_argument("--key", default=cfg("KEYMAKER_KEY"), help="Keymaker key (env: KEYMAKER_KEY)")
     p.add_argument("--env", default=cfg("KEYMAKER_ENV"), help="environment slug to sync (env: KEYMAKER_ENV)")
     p.add_argument("--app", default=cfg("DOKKU_APP"), help="target Dokku app name (env: DOKKU_APP)")
     p.add_argument("--dokku-bin", default=cfg("DOKKU_BIN", "dokku"), help="path to dokku (default: dokku)")
@@ -192,7 +192,7 @@ def main():
     p.add_argument("--watch", type=int, metavar="SECONDS", help="run as a daemon, polling every N seconds")
     args = p.parse_args()
 
-    missing = [n for n in ("url", "token", "env", "app") if not getattr(args, n)]
+    missing = [n for n in ("url", "key", "env", "app") if not getattr(args, n)]
     if missing:
         p.error("missing required config: " + ", ".join(missing))
 

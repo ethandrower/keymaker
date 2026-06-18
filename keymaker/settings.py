@@ -24,14 +24,10 @@ ALLOWED_HOSTS = _env_list("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1")
 # Comma-separated Fernet keys. First is the primary (used for new writes); the rest
 # are kept for decryption so keys can be rotated without downtime.
 KEYMAKER_MASTER_KEYS = _env_list("KEYMAKER_MASTER_KEY")
-KEYMAKER_ADMIN_USERNAMES = [u.lower() for u in _env_list("KEYMAKER_ADMIN_USERNAMES")]
-# Simple shared-account auth: one password the whole team uses. Everyone who logs
-# in is an admin. Leave blank to allow passwordless entry (fully trusting).
-# (Bitbucket OAuth below stays dormant until BITBUCKET_CLIENT_ID is set.)
-KEYMAKER_SHARED_PASSWORD = os.environ.get("KEYMAKER_SHARED_PASSWORD", "")
-BITBUCKET_WORKSPACE = os.environ.get("BITBUCKET_WORKSPACE", "citemed")
-BITBUCKET_CLIENT_ID = os.environ.get("BITBUCKET_CLIENT_ID", "")
-BITBUCKET_CLIENT_SECRET = os.environ.get("BITBUCKET_CLIENT_SECRET", "")
+# The single key: logs you into the UI AND authenticates API/agent requests
+# (Authorization: Bearer <key>). Everyone who has it is an admin. Blank = open
+# (passwordless local dev only — production MUST set it). Rotate by changing it.
+KEYMAKER_KEY = os.environ.get("KEYMAKER_KEY", "")
 KEYMAKER_BASE_URL = os.environ.get("KEYMAKER_BASE_URL", "http://localhost:8000").rstrip("/")
 
 # Keys that Dokku manages itself — never synced, flagged read-only in the UI.
@@ -101,7 +97,7 @@ LOGIN_URL = "/login"
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "vars.auth.ApiTokenAuthentication",
+        "vars.auth.KeymakerKeyAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",

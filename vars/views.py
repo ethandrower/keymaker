@@ -1,16 +1,15 @@
 """UI views (server-rendered + HTMX). Session-authed via AppUser."""
 import functools
-import secrets
 
 from django.conf import settings
 from django.contrib import messages
-from django.http import HttpResponse, HttpResponseForbidden, JsonResponse
+from django.http import HttpResponse, HttpResponseForbidden
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils.text import slugify
 from django.views.decorators.http import require_POST
 
 from . import auth, exporters
-from .models import ApiToken, AuditLog, Environment, Target, Variable
+from .models import AuditLog, Environment, Target, Variable
 
 
 # --- decorators -----------------------------------------------------------
@@ -47,61 +46,21 @@ def _nav_environments():
 def login_view(request):
     if auth.current_user(request):
         return redirect("home")
-    bitbucket_enabled = bool(settings.BITBUCKET_CLIENT_ID)
 
     if request.method == "POST":
-        if auth.check_shared_password(request.POST.get("password", "")):
+        if auth.check_key(request.POST.get("key", "")):
             user = auth.get_shared_user()
             auth.login_appuser(request, user)
             AuditLog.record(actor=user.username, action="login")
             return redirect("home")
-        messages.error(request, "Incorrect password.")
+        messages.error(request, "Incorrect key.")
         return redirect("login")
 
-    state = secrets.token_urlsafe(16)
-    request.session["oauth_state"] = state
     return render(
         request,
         "vars/login.html",
-        {
-            "bitbucket_enabled": bitbucket_enabled,
-            "password_required": bool(settings.KEYMAKER_SHARED_PASSWORD),
-            "authorize_url": auth.authorize_url(state) if bitbucket_enabled else "",
-        },
+        {"key_required": bool(settings.KEYMAKER_KEY)},
     )
-
-
-def oauth_callback(request):
-    if request.GET.get("state") != request.session.get("oauth_state"):
-        messages.error(request, "OAuth state mismatch. Please try again.")
-        return redirect("login")
-    code = request.GET.get("code")
-    if not code:
-        messages.error(request, "No authorization code returned.")
-        return redirect("login")
-    try:
-        access_token = auth.exchange_code(code)
-        info = auth.fetch_bitbucket_user(access_token)
-        if not auth.is_workspace_member(access_token, info["username"]):
-            messages.error(
-                request,
-                f"Your Bitbucket account is not a member of the "
-                f"'{settings.BITBUCKET_WORKSPACE}' workspace.",
-            )
-            return redirect("login")
-    except Exception as exc:  # noqa: BLE001 — surface any OAuth failure to the user
-        messages.error(request, f"Bitbucket login failed: {exc}")
-        return redirect("login")
-
-    user = auth.upsert_appuser(
-        bitbucket_uuid=info["uuid"],
-        username=info["username"],
-        display_name=info["display_name"],
-        email=info["email"],
-    )
-    auth.login_appuser(request, user)
-    AuditLog.record(actor=user.username, action="login")
-    return redirect("home")
 
 
 def logout_view(request):
@@ -355,53 +314,6 @@ def cleanup_archive(request, var_id):
     )
     messages.success(request, f"Archived {key} from {env.name} (restorable on the env page).")
     return redirect("cleanup")
-
-
-# --- tokens ---------------------------------------------------------------
-
-@admin_required
-def tokens(request):
-    return render(
-        request,
-        "vars/tokens.html",
-        {
-            "environments": _nav_environments(),
-            "tokens": ApiToken.objects.select_related("environment").all().order_by("-created_at"),
-            "user": request.appuser,
-            "new_token": request.session.pop("new_token", None),
-        },
-    )
-
-
-@admin_required
-@require_POST
-def token_create(request):
-    env = None
-    env_slug = request.POST.get("environment")
-    if env_slug:
-        env = get_object_or_404(Environment, slug=env_slug)
-    token, raw = ApiToken.issue(
-        name=request.POST.get("name", "").strip() or "token",
-        environment=env,
-        can_write=request.POST.get("can_write") == "on",
-        created_by=request.appuser.username,
-    )
-    request.session["new_token"] = {"name": token.name, "raw": raw}
-    AuditLog.record(
-        actor=request.appuser.username, action="token_create",
-        environment=env.slug if env else "", detail=token.name,
-    )
-    return redirect("tokens")
-
-
-@admin_required
-@require_POST
-def token_revoke(request, token_id):
-    token = get_object_or_404(ApiToken, id=token_id)
-    token.revoked = True
-    token.save(update_fields=["revoked"])
-    AuditLog.record(actor=request.appuser.username, action="token_revoke", detail=token.name)
-    return redirect("tokens")
 
 
 # --- audit ----------------------------------------------------------------

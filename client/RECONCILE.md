@@ -26,7 +26,7 @@ codebase. Pure Python stdlib — nothing to `pip install` on the host or in CI.
 | Flag / env | Purpose |
 | --- | --- |
 | `--url` / `KEYMAKER_URL` | Keymaker base URL |
-| `--token` / `KEYMAKER_TOKEN` | API token (read to scan; **write** required for `--submit`) |
+| `--key` / `KEYMAKER_KEY` | the Keymaker key (same one used to log into the UI) |
 | `--env` / `KEYMAKER_ENV` | environment slug |
 | `--path` | codebase root to scan (default `.`) |
 | `--packages` | also scan a dependency dir (`.venv`, `node_modules`); repeatable |
@@ -49,12 +49,12 @@ dependency-free; set `ANTHROPIC_API_KEY` and pass `--llm`.
 
 ```bash
 # Report only (safe), against an app + its virtualenv, with the LLM tie-breaker:
-KEYMAKER_URL=https://keymaker.citemed.com KEYMAKER_TOKEN=$RO KEYMAKER_ENV=staging \
-  ANTHROPIC_API_KEY=$KEY \
+KEYMAKER_URL=https://keymaker.citemed.com KEYMAKER_KEY=$KEYMAKER_KEY KEYMAKER_ENV=staging \
+  ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
   python3 keymaker_scan.py --path ../citemed_web --packages ../citemed_web/.venv --llm
 
-# Same, but flag unused keys in Keymaker (needs a write token):
-KEYMAKER_TOKEN=$RW python3 keymaker_scan.py --path ../citemed_web \
+# Same, but also flag unused keys back in Keymaker:
+python3 keymaker_scan.py --path ../citemed_web \
   --packages ../citemed_web/.venv --llm --submit
 
 # CI gate: fail the build if keys are used in code but missing from the store

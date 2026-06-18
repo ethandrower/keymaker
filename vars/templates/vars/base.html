@@ -22,7 +22,6 @@
     <nav class="topnav">
       <a href="{% url 'compare' %}">Compare</a>
       <a href="{% url 'cleanup' %}">Cleanup</a>
-      {% if user.is_admin %}<a href="{% url 'tokens' %}">Tokens</a>{% endif %}
       <a href="{% url 'audit_log' %}">Audit</a>
     </nav>
     <div class="spacer"></div>

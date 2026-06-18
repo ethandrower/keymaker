@@ -1,4 +1,6 @@
-"""Agent / client API. Auth = bearer ApiToken (see vars.auth.ApiTokenAuthentication)."""
+"""Agent / client API. Auth = Authorization: Bearer <KEYMAKER_KEY>
+(see vars.auth.KeymakerKeyAuthentication). The key grants full read/write access.
+"""
 from django.conf import settings
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
@@ -11,29 +13,11 @@ from ..exporters import render_dotenv
 from ..models import AuditLog, Environment, Variable
 
 
-def _check_scope(request, env, *, write):
-    """Validate the token's environment scope and write permission."""
-    token = request.auth  # the ApiToken instance
-    if token.environment_id and token.environment_id != env.id:
-        return Response(
-            {"detail": "Token is not scoped to this environment."},
-            status=status.HTTP_403_FORBIDDEN,
-        )
-    if write and not token.can_write:
-        return Response(
-            {"detail": "Token is read-only."}, status=status.HTTP_403_FORBIDDEN
-        )
-    return None
-
-
 class RevisionView(APIView):
     """Cheap change-detection poll for the sync client."""
 
     def get(self, request, slug):
         env = get_object_or_404(Environment, slug=slug)
-        denied = _check_scope(request, env, write=False)
-        if denied:
-            return denied
         resp = Response({"slug": env.slug, "revision": env.revision})
         resp["ETag"] = f'"{env.revision}"'
         return resp
@@ -44,9 +28,6 @@ class VariablesView(APIView):
 
     def get(self, request, slug):
         env = get_object_or_404(Environment, slug=slug)
-        denied = _check_scope(request, env, write=False)
-        if denied:
-            return denied
 
         include_managed = request.query_params.get("include_managed") == "1"
         qs = env.active_vars()
@@ -78,9 +59,6 @@ class VariablesView(APIView):
 class VariableDetailView(APIView):
     def put(self, request, slug, key):
         env = get_object_or_404(Environment, slug=slug)
-        denied = _check_scope(request, env, write=True)
-        if denied:
-            return denied
         if key in settings.KEYMAKER_MANAGED_KEYS:
             return Response(
                 {"detail": f"{key} is a managed key and cannot be set here."},
@@ -114,9 +92,6 @@ class VariableDetailView(APIView):
 
     def delete(self, request, slug, key):
         env = get_object_or_404(Environment, slug=slug)
-        denied = _check_scope(request, env, write=True)
-        if denied:
-            return denied
         var = env.active_vars().filter(key=key).first()
         if not var:
             return Response(status=status.HTTP_404_NOT_FOUND)
@@ -142,14 +117,10 @@ class AuditView(APIView):
     Body: {"results": {"KEY": {"used": bool, "references": int, "note": str}, ...}}
     Keys present in the store but absent from `results` are left untouched.
     Marks `suspected_unused` (never deletes — a human prunes in the UI).
-    Requires a write-scoped token.
     """
 
     def post(self, request, slug):
         env = get_object_or_404(Environment, slug=slug)
-        denied = _check_scope(request, env, write=True)
-        if denied:
-            return denied
 
         results = request.data.get("results", {}) or {}
         now = timezone.now()

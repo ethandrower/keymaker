@@ -19,19 +19,17 @@
 
     <form method="post" action="{% url 'login' %}">
       {% csrf_token %}
-      {% if password_required %}
-        <input type="password" name="password" placeholder="Shared password" autofocus
+      {% if key_required %}
+        <input type="password" name="key" placeholder="Key" autofocus
                class="block" style="width:100%;margin:8px 0;">
       {% else %}
-        <p class="muted small">No password set — shared access.</p>
+        <p class="muted small">No key set — open access (set KEYMAKER_KEY).</p>
       {% endif %}
       <button type="submit" class="btn primary block">Enter</button>
     </form>
 
-    {% if bitbucket_enabled %}
-      <a class="btn block secondary" href="{{ authorize_url }}">Sign in with Bitbucket</a>
-    {% endif %}
-    <p class="muted small">Shared team account. Per-user login coming later.</p>
+    <p class="muted small">The same key authenticates agents via
+      <code>Authorization: Bearer &lt;key&gt;</code>.</p>
   </div>
 </body>
 </html>

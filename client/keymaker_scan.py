@@ -17,7 +17,7 @@ the Cleanup UI).
 
 Config via flags or environment:
   KEYMAKER_URL        base URL, e.g. https://keymaker.citemed.com
-  KEYMAKER_TOKEN      API token (read to scan; write required for --submit)
+  KEYMAKER_KEY        the Keymaker key (same one used to log into the UI)
   KEYMAKER_ENV        environment slug to reconcile, e.g. staging
   ANTHROPIC_API_KEY   enables the LLM tie-breaker (with --llm)
   KEYMAKER_LLM_MODEL  override the model (default: claude-opus-4-8)
@@ -225,24 +225,25 @@ def prefix_of(key):
 
 def main():
     p = argparse.ArgumentParser(description="Reconcile a codebase against Keymaker")
-    p.add_argument("--url", default=os.environ.get("KEYMAKER_URL"))
-    p.add_argument("--token", default=os.environ.get("KEYMAKER_TOKEN"))
-    p.add_argument("--env", default=os.environ.get("KEYMAKER_ENV"))
+    p.add_argument("--url", default=os.environ.get("KEYMAKER_URL"), help="Keymaker base URL (env: KEYMAKER_URL)")
+    p.add_argument("--key", default=os.environ.get("KEYMAKER_KEY"), help="Keymaker key (env: KEYMAKER_KEY)")
+    p.add_argument("--env", default=os.environ.get("KEYMAKER_ENV"), help="environment slug to reconcile (env: KEYMAKER_ENV)")
     p.add_argument("--path", default=".", help="codebase root to scan")
     p.add_argument("--packages", action="append", default=[],
                    help="also scan this dependency dir (e.g. a .venv or node_modules); repeatable")
-    p.add_argument("--llm", action="store_true", help="use Claude to judge ambiguous keys")
-    p.add_argument("--llm-model", default=os.environ.get("KEYMAKER_LLM_MODEL", "claude-opus-4-8"))
-    p.add_argument("--submit", action="store_true", help="POST results back (flag unused)")
-    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.add_argument("--llm", action="store_true", help="use Claude to judge ambiguous keys (needs ANTHROPIC_API_KEY)")
+    p.add_argument("--llm-model", default=os.environ.get("KEYMAKER_LLM_MODEL", "claude-opus-4-8"),
+                   help="model for the tie-breaker (env: KEYMAKER_LLM_MODEL)")
+    p.add_argument("--submit", action="store_true", help="POST results back to flag unused keys")
+    p.add_argument("--json", action="store_true", help="machine-readable output (for CI)")
     args = p.parse_args()
 
-    missing_cfg = [n for n in ("url", "token", "env") if not getattr(args, n)]
+    missing_cfg = [n for n in ("url", "key", "env") if not getattr(args, n)]
     if missing_cfg:
         p.error("missing required config: " + ", ".join(missing_cfg))
 
     base = args.url.rstrip("/")
-    keys, managed = fetch_store_keys(base, args.env, args.token)
+    keys, managed = fetch_store_keys(base, args.env, args.key)
     if not keys:
         print(f"No (non-managed) variables in environment '{args.env}'.")
         return
@@ -304,7 +305,7 @@ def main():
         _print_report(args.env, classification, results, missing, managed)
 
     if args.submit:
-        resp = km_post(base, f"/api/v1/environments/{args.env}/audit", args.token,
+        resp = km_post(base, f"/api/v1/environments/{args.env}/audit", args.key,
                        {"results": results, "missing": missing})
         print(f"\nSubmitted to Keymaker: flagged {len(resp.get('flagged_unused', []))} "
               f"as suspected-unused, cleared {len(resp.get('cleared', []))}.")

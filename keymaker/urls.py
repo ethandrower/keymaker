@@ -7,7 +7,6 @@ urlpatterns = [
     path("", views.home, name="home"),
     path("login", views.login_view, name="login"),
     path("logout", views.logout_view, name="logout"),
-    path("oauth/callback", views.oauth_callback, name="oauth_callback"),
 
     path("environments/<slug:slug>/", views.environment_detail, name="environment_detail"),
     path("environments/<slug:slug>/download", views.environment_download, name="environment_download"),
@@ -25,10 +24,7 @@ urlpatterns = [
     path("environments/new", views.environment_create, name="environment_create"),
     path("environments/<slug:slug>/targets/save", views.target_save, name="target_save"),
 
-    # Tokens + audit (admin)
-    path("tokens/", views.tokens, name="tokens"),
-    path("tokens/create", views.token_create, name="token_create"),
-    path("tokens/<int:token_id>/revoke", views.token_revoke, name="token_revoke"),
+    # Audit
     path("audit/", views.audit_log, name="audit_log"),
 
     # Agent/client API
