@@ -96,8 +96,8 @@ class Variable(models.Model):
         help_text="Blank = applies to all targets; set = overrides the base for that target only",
     )
     # Free-text label for visually grouping variables within an environment
-    # (e.g. "Django app", "Mail", "Scraping"). Blank = ungrouped.
-    group = models.CharField(max_length=80, blank=True)
+    # (e.g. "Django app", "Mail", "Scraping"). Blank = unlabeled.
+    label = models.CharField(max_length=80, blank=True)
     updated_by = models.CharField(max_length=150, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -118,7 +118,7 @@ class Variable(models.Model):
     archived_reason = models.CharField(max_length=400, blank=True)
 
     class Meta:
-        ordering = ["group", "key"]
+        ordering = ["label", "key"]
         # One ACTIVE variable per (key, scope); archived rows may repeat. Two partial
         # constraints because NULL targets are "distinct" in a plain unique index.
         constraints = [

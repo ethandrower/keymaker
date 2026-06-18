@@ -84,7 +84,7 @@ class VariablesView(APIView):
 class VariableDetailView(APIView):
     def put(self, request, slug, key):
         """Upsert a key at a scope. Body: value, is_secret, optional `target`
-        (label/dokku_app/id; omit for all-targets) and `group` label."""
+        (label/dokku_app/id; omit for all-targets) and `label`."""
         env = get_object_or_404(Environment, slug=slug)
         if key in settings.KEYMAKER_MANAGED_KEYS:
             return Response(
@@ -110,8 +110,8 @@ class VariableDetailView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         var.is_secret = is_secret
-        if "group" in request.data:
-            var.group = (request.data.get("group") or "")[:80]
+        if "label" in request.data:
+            var.label = (request.data.get("label") or "")[:80]
         var.set_value(value)
         var.updated_by = str(request.user)
         var.save()

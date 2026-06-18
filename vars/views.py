@@ -160,7 +160,7 @@ def variable_save(request, slug):
     var.key = key
     var.is_secret = is_secret
     var.target = _env_target(env, request.POST.get("target"))  # blank = all targets
-    var.group = (request.POST.get("group") or "").strip()[:80]
+    var.label = (request.POST.get("label") or "").strip()[:80]
     var.set_value(value)
     var.updated_by = request.appuser.username
     var.save()
@@ -242,16 +242,46 @@ def environment_create(request):
 @admin_required
 @require_POST
 def target_save(request, slug):
+    """Create a target, or update it when an id is supplied."""
     env = get_object_or_404(Environment, slug=slug)
-    Target.objects.create(
-        environment=env,
-        label=request.POST.get("label", "").strip() or "target",
-        host=request.POST.get("host", "").strip(),
-        dokku_app=request.POST.get("dokku_app", "").strip(),
-        domain=request.POST.get("domain", "").strip(),
-        local_only=request.POST.get("local_only") == "on",
+    fields = {
+        "label": request.POST.get("label", "").strip() or "target",
+        "host": request.POST.get("host", "").strip(),
+        "dokku_app": request.POST.get("dokku_app", "").strip(),
+        "domain": request.POST.get("domain", "").strip(),
+        "local_only": request.POST.get("local_only") == "on",
+    }
+    target_id = request.POST.get("id")
+    if target_id:
+        target = get_object_or_404(Target, id=target_id, environment=env)
+        for k, v in fields.items():
+            setattr(target, k, v)
+        target.save()
+        action = "target_update"
+    else:
+        target = Target.objects.create(environment=env, **fields)
+        action = "target_add"
+    AuditLog.record(actor=request.appuser.username, action=action, environment=slug,
+                    detail=target.label)
+    return redirect("environment_detail", slug=env.slug)
+
+
+@admin_required
+@require_POST
+def target_delete(request, slug, target_id):
+    """Delete a target. Its target-specific variable overrides go with it
+    (CASCADE); all-targets base values are unaffected."""
+    env = get_object_or_404(Environment, slug=slug)
+    target = get_object_or_404(Target, id=target_id, environment=env)
+    label = target.label
+    n_overrides = target.variables.count()
+    target.delete()
+    env.bump_revision()
+    AuditLog.record(
+        actor=request.appuser.username, action="target_delete", environment=slug,
+        detail=f"{label} (+{n_overrides} override(s))",
     )
-    AuditLog.record(actor=request.appuser.username, action="target_add", environment=slug)
+    messages.success(request, f"Deleted target {label} and {n_overrides} override(s).")
     return redirect("environment_detail", slug=env.slug)
 
 

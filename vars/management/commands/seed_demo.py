@@ -11,9 +11,9 @@ from django.core.management.base import BaseCommand
 from vars.models import Environment, Target, Variable
 
 
-def V(key, value, *, secret=False, managed=False, group="", target=None):
+def V(key, value, *, secret=False, managed=False, label="", target=None):
     return {"key": key, "value": value, "secret": secret, "managed": managed,
-            "group": group, "target": target}
+            "label": label, "target": target}
 
 
 DEMO = {
@@ -29,17 +29,17 @@ DEMO = {
         ],
         "vars": [
             # Base values shared by all targets
-            V("ENV", "STAGING", group="Django"),
-            V("SECRET_KEY", "staging-django-secret-abc123", secret=True, group="Django"),
-            V("AWS_ACCESS_KEY_ID", "AKIASTAGINGEXAMPLE", secret=True, group="AWS / S3"),
-            V("AWS_SECRET_ACCESS_KEY", "staging-aws-secret-xxxx", secret=True, group="AWS / S3"),
-            V("MAILGUN_ACCESS_KEY", "key-staging-mailgun-xyz", secret=True, group="Mail"),
+            V("ENV", "STAGING", label="Django"),
+            V("SECRET_KEY", "staging-django-secret-abc123", secret=True, label="Django"),
+            V("AWS_ACCESS_KEY_ID", "AKIASTAGINGEXAMPLE", secret=True, label="AWS / S3"),
+            V("AWS_SECRET_ACCESS_KEY", "staging-aws-secret-xxxx", secret=True, label="AWS / S3"),
+            V("MAILGUN_ACCESS_KEY", "key-staging-mailgun-xyz", secret=True, label="Mail"),
             V("DATABASE_URL", "postgres://auto@db/app", managed=True),  # Dokku-managed
             # Per-target overrides (differ per dev box)
-            V("SITE_URL", "https://dev-ada.staging.example.com", group="Django", target="dev-ada"),
-            V("ALLOWED_HOSTS", "dev-ada.staging.example.com,dev-ada", group="Django", target="dev-ada"),
-            V("SITE_URL", "https://dev-bo.staging.example.com", group="Django", target="dev-bo"),
-            V("ALLOWED_HOSTS", "dev-bo.staging.example.com,dev-bo", group="Django", target="dev-bo"),
+            V("SITE_URL", "https://dev-ada.staging.example.com", label="Django", target="dev-ada"),
+            V("ALLOWED_HOSTS", "dev-ada.staging.example.com,dev-ada", label="Django", target="dev-ada"),
+            V("SITE_URL", "https://dev-bo.staging.example.com", label="Django", target="dev-bo"),
+            V("ALLOWED_HOSTS", "dev-bo.staging.example.com,dev-bo", label="Django", target="dev-bo"),
         ],
     },
     "production": {
@@ -51,12 +51,12 @@ DEMO = {
              "domain": "cloud.example.com"},
         ],
         "vars": [
-            V("ENV", "PRODUCTION", group="Django"),
-            V("SITE_URL", "https://cloud.example.com", group="Django"),
-            V("ALLOWED_HOSTS", "cloud.example.com", group="Django"),
-            V("SECRET_KEY", "prod-django-secret-DIFFERENT", secret=True, group="Django"),
-            V("AWS_ACCESS_KEY_ID", "AKIAPRODEXAMPLE", secret=True, group="AWS / S3"),
-            V("MAILGUN_ACCESS_KEY", "key-prod-mailgun-xyz", secret=True, group="Mail"),
+            V("ENV", "PRODUCTION", label="Django"),
+            V("SITE_URL", "https://cloud.example.com", label="Django"),
+            V("ALLOWED_HOSTS", "cloud.example.com", label="Django"),
+            V("SECRET_KEY", "prod-django-secret-DIFFERENT", secret=True, label="Django"),
+            V("AWS_ACCESS_KEY_ID", "AKIAPRODEXAMPLE", secret=True, label="AWS / S3"),
+            V("MAILGUN_ACCESS_KEY", "key-prod-mailgun-xyz", secret=True, label="Mail"),
             V("DATABASE_URL", "postgres://auto@db/app", managed=True),
         ],
     },
@@ -66,10 +66,10 @@ DEMO = {
         "description": "Developer Docker Compose stack",
         "targets": [{"label": "localhost", "local_only": True}],
         "vars": [
-            V("ENV", "LOCAL", group="Django"),
-            V("SITE_URL", "http://localhost:8000", group="Django"),
-            V("ALLOWED_HOSTS", "localhost,127.0.0.1", group="Django"),
-            V("SECRET_KEY", "local-insecure-secret", secret=True, group="Django"),
+            V("ENV", "LOCAL", label="Django"),
+            V("SITE_URL", "http://localhost:8000", label="Django"),
+            V("ALLOWED_HOSTS", "localhost,127.0.0.1", label="Django"),
+            V("SECRET_KEY", "local-insecure-secret", secret=True, label="Django"),
         ],
     },
 }
@@ -98,7 +98,7 @@ class Command(BaseCommand):
                 var, _ = Variable.objects.get_or_create(environment=env, key=v["key"], target=target)
                 var.is_secret = v["secret"]
                 var.is_managed = v["managed"]
-                var.group = v["group"]
+                var.label = v["label"]
                 var.set_value(v["value"])
                 var.updated_by = "seed"
                 var.save()

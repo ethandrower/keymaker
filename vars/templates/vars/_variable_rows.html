@@ -1,13 +1,13 @@
 {% comment %}<tbody> of the variables table: grouped by label, with a Scope column.
-Swapped in by HTMX after edits. `variables` is ordered by (group, key).{% endcomment %}
+Swapped in by HTMX after edits. `variables` is ordered by (label, key).{% endcomment %}
 {% load static %}
 <tbody id="var-rows">
-  {% regroup variables by group as grouped %}
+  {% regroup variables by label as grouped %}
   {% for grp in grouped %}
     {% if grouped|length > 1 or grp.grouper %}
       <tr class="group-head">
         <td colspan="{% if user.is_admin %}4{% else %}3{% endif %}">
-          {{ grp.grouper|default:"Ungrouped" }}
+          {{ grp.grouper|default:"Unlabeled" }}
         </td>
       </tr>
     {% endif %}
@@ -44,7 +44,7 @@ Swapped in by HTMX after edits. `variables` is ordered by (group, key).{% endcom
           <td class="actions">
             {% if not v.is_managed %}
               <button class="btn small"
-                      @click="$dispatch('edit-var', {id: {{ v.id }}, key: '{{ v.key|escapejs }}', is_secret: {{ v.is_secret|yesno:'true,false' }}, target: '{{ v.target_id|default_if_none:'' }}', group: '{{ v.group|escapejs }}' })">Edit</button>
+                      @click="$dispatch('edit-var', {id: {{ v.id }}, key: '{{ v.key|escapejs }}', is_secret: {{ v.is_secret|yesno:'true,false' }}, target: '{{ v.target_id|default_if_none:'' }}', label: '{{ v.label|escapejs }}' })">Edit</button>
               <form method="post" action="{% url 'variable_archive' env.slug v.id %}" style="display:inline"
                     onsubmit="var r=prompt('Archive {{ v.key|escapejs }} [{{ v.scope_label|escapejs }}] — reason? (kept & restorable)'); if(r===null){return false;} this.reason.value=r;">
                 {% csrf_token %}

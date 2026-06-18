@@ -24,10 +24,34 @@
   </div>
 </div>
 
-<section class="targets">
-  <h3>Targets <span class="muted small">where this env runs</span></h3>
+<section class="targets"
+         x-data="{ topen:false, t:{id:'',label:'',host:'',dokku_app:'',domain:'',local_only:false} }"
+         @edit-target.window="topen=true; t={...$event.detail}">
+  <div class="section-bar">
+    <h3>Targets <span class="muted small">where this env runs</span></h3>
+    {% if user.is_admin %}
+      <button class="btn primary small" @click="topen=true; t={id:'',label:'',host:'',dokku_app:'',domain:'',local_only:false}">+ Add target</button>
+    {% endif %}
+  </div>
+
+  {% if user.is_admin %}
+    <div class="var-editor" x-show="topen" x-cloak>
+      <form method="post" action="{% url 'target_save' env.slug %}" class="inline-form">
+        {% csrf_token %}
+        <input type="hidden" name="id" :value="t.id">
+        <input name="label" placeholder="Label (e.g. dev-kesha)" x-model="t.label" required>
+        <input name="host" placeholder="IP / host" x-model="t.host">
+        <input name="dokku_app" placeholder="dokku app" x-model="t.dokku_app">
+        <input name="domain" placeholder="domain" x-model="t.domain">
+        <label class="chk"><input type="checkbox" name="local_only" x-model="t.local_only"> local only</label>
+        <button type="submit" class="btn primary">Save</button>
+        <button type="button" class="btn" @click="topen=false">Cancel</button>
+      </form>
+    </div>
+  {% endif %}
+
   <table class="mini">
-    <thead><tr><th>Label</th><th>Host / IP</th><th>Dokku app</th><th>Domain</th></tr></thead>
+    <thead><tr><th>Label</th><th>Host / IP</th><th>Dokku app</th><th>Domain</th>{% if user.is_admin %}<th></th>{% endif %}</tr></thead>
     <tbody>
       {% for t in env.targets.all %}
         <tr>
@@ -35,35 +59,32 @@
           <td>{{ t.host|default:"—" }}</td>
           <td><code>{{ t.dokku_app|default:"—" }}</code></td>
           <td>{{ t.domain|default:"—" }}</td>
+          {% if user.is_admin %}
+            <td class="actions">
+              <button class="btn small"
+                      @click="$dispatch('edit-target', {id:{{ t.id }}, label:'{{ t.label|escapejs }}', host:'{{ t.host|escapejs }}', dokku_app:'{{ t.dokku_app|escapejs }}', domain:'{{ t.domain|escapejs }}', local_only:{{ t.local_only|yesno:'true,false' }} })">Edit</button>
+              <form method="post" action="{% url 'target_delete' env.slug t.id %}" style="display:inline"
+                    onsubmit="return confirm('Delete target {{ t.label|escapejs }}? This also removes {{ t.variables.count }} target-specific override(s). All-targets values are unaffected.')">
+                {% csrf_token %}
+                <button class="btn small danger" type="submit">Delete</button>
+              </form>
+            </td>
+          {% endif %}
         </tr>
       {% empty %}
-        <tr><td colspan="4" class="muted">No targets defined.</td></tr>
+        <tr><td colspan="{% if user.is_admin %}5{% else %}4{% endif %}" class="muted">No targets defined.</td></tr>
       {% endfor %}
     </tbody>
   </table>
-  {% if user.is_admin %}
-    <details class="add-target">
-      <summary>+ Add target</summary>
-      <form method="post" action="{% url 'target_save' env.slug %}" class="inline-form">
-        {% csrf_token %}
-        <input name="label" placeholder="Label (e.g. Staging box)" required>
-        <input name="host" placeholder="IP / host">
-        <input name="dokku_app" placeholder="dokku app">
-        <input name="domain" placeholder="domain">
-        <label class="chk"><input type="checkbox" name="local_only"> local only</label>
-        <button type="submit">Save</button>
-      </form>
-    </details>
-  {% endif %}
 </section>
 
 <section class="variables"
-         x-data="{ open: false, form: { id:'', key:'', value:'', is_secret:true, target:'', group:'' } }"
-         @edit-var.window="open=true; form={ id:$event.detail.id, key:$event.detail.key, value:'', is_secret:$event.detail.is_secret, target:$event.detail.target, group:$event.detail.group }">
+         x-data="{ open: false, form: { id:'', key:'', value:'', is_secret:true, target:'', label:'' } }"
+         @edit-var.window="open=true; form={ id:$event.detail.id, key:$event.detail.key, value:'', is_secret:$event.detail.is_secret, target:$event.detail.target, label:$event.detail.label }">
   <div class="section-bar">
     <h3>Variables</h3>
     {% if user.is_admin %}
-      <button class="btn primary small" @click="open=true; form={id:'',key:'',value:'',is_secret:true,target:'',group:''}">+ Add variable</button>
+      <button class="btn primary small" @click="open=true; form={id:'',key:'',value:'',is_secret:true,target:'',label:''}">+ Add variable</button>
     {% endif %}
   </div>
 
@@ -72,16 +93,16 @@
       <form hx-post="{% url 'variable_save' env.slug %}" hx-target="#var-rows" hx-swap="outerHTML"
             @htmx:after-request="if($event.detail.successful){ open=false }">
         <input type="hidden" name="id" :value="form.id">
-        <input name="key" placeholder="KEY" x-model="form.key" :readonly="form.id" required>
+        <input name="key" placeholder="KEY" x-model="form.key" :readonly="!!form.id" required>
         <input name="value" placeholder="value" x-model="form.value"
                :placeholder="form.id ? 'new value (leave blank to keep)' : 'value'">
         <select name="target" x-model="form.target" title="Which target this value applies to">
           <option value="">All targets</option>
           {% for t in targets %}<option value="{{ t.id }}">{{ t.label }} (override)</option>{% endfor %}
         </select>
-        <input name="group" placeholder="group (e.g. Django)" x-model="form.group" list="group-labels" style="width:140px">
-        <datalist id="group-labels">
-          {% regroup variables by group as gl %}{% for g in gl %}{% if g.grouper %}<option value="{{ g.grouper }}">{% endif %}{% endfor %}
+        <input name="label" placeholder="label (e.g. Django)" x-model="form.label" list="var-labels" style="width:140px">
+        <datalist id="var-labels">
+          {% regroup variables by label as gl %}{% for g in gl %}{% if g.grouper %}<option value="{{ g.grouper }}">{% endif %}{% endfor %}
         </datalist>
         <label class="chk"><input type="checkbox" name="is_secret" x-model="form.is_secret"> secret</label>
         <button type="submit" class="btn primary">Save</button>
