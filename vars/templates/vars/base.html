@@ -1,0 +1,76 @@
+{% load static %}<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <title>{% block title %}Keymaker{% endblock %}</title>
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <link rel="stylesheet" href="{% static 'vars/app.css' %}">
+  <script>
+    // Send CSRF token with every HTMX request.
+    document.body && document.body.addEventListener('htmx:configRequest', function (e) {
+      e.detail.headers['X-CSRFToken'] =
+        document.querySelector('meta[name=csrf-token]').content;
+    });
+  </script>
+</head>
+<body hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'>
+  <header class="topbar">
+    <a href="{% url 'home' %}" class="brand">🔐 Keymaker</a>
+    <nav class="topnav">
+      <a href="{% url 'compare' %}">Compare</a>
+      <a href="{% url 'cleanup' %}">Cleanup</a>
+      {% if user.is_admin %}<a href="{% url 'tokens' %}">Tokens</a>{% endif %}
+      <a href="{% url 'audit_log' %}">Audit</a>
+    </nav>
+    <div class="spacer"></div>
+    {% if user %}
+      <span class="whoami">{{ user.display_name|default:user.username }}{% if user.is_admin %} · admin{% endif %}</span>
+      <a href="{% url 'logout' %}" class="btn-link">Sign out</a>
+    {% endif %}
+  </header>
+
+  {% if messages %}
+    <ul class="messages">
+      {% for m in messages %}<li class="msg {{ m.tags }}">{{ m }}</li>{% endfor %}
+    </ul>
+  {% endif %}
+
+  <div class="layout">
+    {% block sidebar %}
+    <aside class="sidebar">
+      <div class="side-head">Environments</div>
+      <ul class="env-tabs">
+        {% for e in environments %}
+          <li>
+            <a href="{% url 'environment_detail' e.slug %}"
+               class="env-tab {% if env and e.slug == env.slug %}active{% endif %}">
+              <span class="dot {{ e.kind }}"></span>{{ e.name }}
+            </a>
+          </li>
+        {% empty %}
+          <li class="muted">No environments yet</li>
+        {% endfor %}
+      </ul>
+      {% if user.is_admin %}
+        <form method="post" action="{% url 'environment_create' %}" class="new-env">
+          {% csrf_token %}
+          <input name="name" placeholder="New environment name" required>
+          <select name="kind">
+            <option value="shared">Shared server</option>
+            <option value="local">Local devs only</option>
+          </select>
+          <button type="submit">+ Add</button>
+        </form>
+      {% endif %}
+    </aside>
+    {% endblock %}
+
+    <main class="content">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</body>
+</html>

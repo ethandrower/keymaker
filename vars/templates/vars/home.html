@@ -1,0 +1,12 @@
+{% extends "vars/base.html" %}
+{% block title %}Keymaker{% endblock %}
+{% block content %}
+  <div class="empty-state">
+    <h2>No environments yet</h2>
+    {% if user.is_admin %}
+      <p>Create your first environment using the form in the sidebar.</p>
+    {% else %}
+      <p>Ask an admin to create an environment.</p>
+    {% endif %}
+  </div>
+{% endblock %}

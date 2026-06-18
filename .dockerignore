@@ -1,0 +1,9 @@
+.env
+.git
+*.pyc
+__pycache__/
+db.sqlite3
+staticfiles/
+.venv/
+.keymaker-sync-*.json
+.DS_Store

@@ -1,0 +1,50 @@
+{% comment %}Renders the <tbody> of the variables table. Swapped in by HTMX after edits.{% endcomment %}
+<tbody id="var-rows">
+  {% for v in variables %}
+    <tr x-data="{ revealed: false, value: '' }">
+      <td class="key">
+        {{ v.key }}
+        {% if v.is_managed %}<span class="badge managed">managed</span>{% endif %}
+        {% if v.is_secret %}<span class="badge secret">secret</span>{% endif %}
+        {% if v.suspected_unused %}<span class="badge unused" title="{{ v.audit_note }} — last seen {{ v.last_seen_at|default:'never' }}">⚠ unused?</span>{% endif %}
+      </td>
+      <td class="value">
+        {% if v.is_secret %}
+          <span x-show="!revealed" class="masked">••••••••</span>
+          <code x-show="revealed" x-text="value" class="revealed-value"></code>
+          <button class="icon-btn"
+                  @click="if(!revealed){ value = await (await fetch('{% url 'variable_reveal' env.slug v.id %}')).text(); } revealed = !revealed"
+                  :title="revealed ? 'Hide' : 'Reveal'">
+            <span x-text="revealed ? '🙈' : '👁'"></span>
+          </button>
+          <button class="icon-btn"
+                  @click="let val = revealed ? value : await (await fetch('{% url 'variable_reveal' env.slug v.id %}')).text(); navigator.clipboard.writeText(val); $el.textContent='✓'; setTimeout(()=>$el.textContent='📋',1000)"
+                  title="Copy">📋</button>
+        {% else %}
+          <code>{{ v.value }}</code>
+          <button class="icon-btn"
+                  @click="navigator.clipboard.writeText('{{ v.value|escapejs }}'); $el.textContent='✓'; setTimeout(()=>$el.textContent='📋',1000)"
+                  title="Copy">📋</button>
+        {% endif %}
+      </td>
+      {% if user.is_admin %}
+        <td class="actions">
+          {% if not v.is_managed %}
+            <button class="btn small"
+                    @click="$dispatch('edit-var', {id: {{ v.id }}, key: '{{ v.key|escapejs }}', is_secret: {{ v.is_secret|yesno:'true,false' }} })">Edit</button>
+            <form method="post" action="{% url 'variable_archive' env.slug v.id %}" style="display:inline"
+                  onsubmit="var r=prompt('Archive {{ v.key|escapejs }} — reason? (kept & restorable)'); if(r===null){return false;} this.reason.value=r;">
+              {% csrf_token %}
+              <input type="hidden" name="reason">
+              <button class="btn small danger" type="submit">Archive</button>
+            </form>
+          {% else %}
+            <span class="muted small">read-only</span>
+          {% endif %}
+        </td>
+      {% endif %}
+    </tr>
+  {% empty %}
+    <tr><td colspan="{% if user.is_admin %}3{% else %}2{% endif %}" class="muted">No variables yet.</td></tr>
+  {% endfor %}
+</tbody>

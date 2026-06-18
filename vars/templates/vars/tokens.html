@@ -1,0 +1,51 @@
+{% extends "vars/base.html" %}
+{% block title %}API tokens · Keymaker{% endblock %}
+{% block content %}
+<div class="env-header"><h2>API tokens</h2></div>
+<p class="muted">Tokens authenticate agents and the Dokku sync client. Use header
+  <code>Authorization: Bearer &lt;token&gt;</code>.</p>
+
+{% if new_token %}
+  <div class="token-reveal">
+    <strong>New token "{{ new_token.name }}" — copy it now, it won't be shown again:</strong>
+    <code class="token-value">{{ new_token.raw }}</code>
+  </div>
+{% endif %}
+
+<form method="post" action="{% url 'token_create' %}" class="inline-form">
+  {% csrf_token %}
+  <input name="name" placeholder="Token name (e.g. dokku-staging)" required>
+  <select name="environment">
+    <option value="">All environments</option>
+    {% for e in environments %}<option value="{{ e.slug }}">{{ e.name }}</option>{% endfor %}
+  </select>
+  <label class="chk"><input type="checkbox" name="can_write"> can write</label>
+  <button type="submit" class="btn primary">Create token</button>
+</form>
+
+<table class="mini">
+  <thead><tr><th>Name</th><th>Scope</th><th>Write</th><th>Prefix</th><th>Last used</th><th>Status</th><th></th></tr></thead>
+  <tbody>
+    {% for t in tokens %}
+      <tr class="{% if t.revoked %}revoked{% endif %}">
+        <td>{{ t.name }}</td>
+        <td>{{ t.environment.slug|default:"all" }}</td>
+        <td>{{ t.can_write|yesno:"yes,read-only" }}</td>
+        <td><code>{{ t.token_prefix }}…</code></td>
+        <td>{{ t.last_used_at|default:"never" }}</td>
+        <td>{% if t.revoked %}revoked{% else %}active{% endif %}</td>
+        <td>
+          {% if not t.revoked %}
+            <form method="post" action="{% url 'token_revoke' t.id %}">
+              {% csrf_token %}
+              <button class="btn small danger">Revoke</button>
+            </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% empty %}
+      <tr><td colspan="7" class="muted">No tokens yet.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

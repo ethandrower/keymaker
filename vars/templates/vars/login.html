@@ -1,0 +1,37 @@
+{% load static %}<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · Keymaker</title>
+  <link rel="stylesheet" href="{% static 'vars/app.css' %}">
+</head>
+<body class="login-body">
+  <div class="login-card">
+    <h1>🔐 Keymaker</h1>
+    <p class="muted">Environment &amp; secret management</p>
+
+    {% if messages %}
+      <ul class="messages">
+        {% for m in messages %}<li class="msg {{ m.tags }}">{{ m }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    <form method="post" action="{% url 'login' %}">
+      {% csrf_token %}
+      {% if password_required %}
+        <input type="password" name="password" placeholder="Shared password" autofocus
+               class="block" style="width:100%;margin:8px 0;">
+      {% else %}
+        <p class="muted small">No password set — shared access.</p>
+      {% endif %}
+      <button type="submit" class="btn primary block">Enter</button>
+    </form>
+
+    {% if bitbucket_enabled %}
+      <a class="btn block secondary" href="{{ authorize_url }}">Sign in with Bitbucket</a>
+    {% endif %}
+    <p class="muted small">Shared team account. Per-user login coming later.</p>
+  </div>
+</body>
+</html>

@@ -1,0 +1,22 @@
+{% extends "vars/base.html" %}
+{% block title %}Audit log · Keymaker{% endblock %}
+{% block content %}
+<div class="env-header"><h2>Audit log</h2></div>
+<table class="mini">
+  <thead><tr><th>When</th><th>Actor</th><th>Action</th><th>Environment</th><th>Key</th><th>Detail</th></tr></thead>
+  <tbody>
+    {% for log in logs %}
+      <tr>
+        <td class="muted small">{{ log.created_at|date:"Y-m-d H:i:s" }}</td>
+        <td>{{ log.actor }}</td>
+        <td><span class="badge">{{ log.action }}</span></td>
+        <td>{{ log.environment }}</td>
+        <td><code>{{ log.key }}</code></td>
+        <td class="muted">{{ log.detail }}</td>
+      </tr>
+    {% empty %}
+      <tr><td colspan="6" class="muted">No activity yet.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

@@ -1,0 +1,40 @@
+{% extends "vars/base.html" %}
+{% block title %}Cleanup · Keymaker{% endblock %}
+{% block content %}
+<div class="env-header">
+  <h2>Cleanup — suspected-unused variables</h2>
+</div>
+<p class="muted">Flagged by the <code>keymaker scan</code> client: not referenced in
+  the codebase or its imported packages. Review and archive the ones you don't
+  need — archiving is a soft delete, restorable from the environment page. (Keys
+  read only at runtime may show up here — check the note before archiving.)</p>
+
+<table class="mini">
+  <thead><tr><th>Environment</th><th>Key</th><th>Last seen in code</th><th>Last scanned</th><th>Note</th>{% if user.is_admin %}<th></th>{% endif %}</tr></thead>
+  <tbody>
+    {% for v in flagged %}
+      <tr>
+        <td><a href="{% url 'environment_detail' v.environment.slug %}">{{ v.environment.name }}</a></td>
+        <td><code>{{ v.key }}</code> {% if v.is_secret %}<span class="badge secret">secret</span>{% endif %}</td>
+        <td class="muted small">{{ v.last_seen_at|default:"never" }}</td>
+        <td class="muted small">{{ v.last_audit_at|default:"—" }}</td>
+        <td class="muted">{{ v.audit_note }}</td>
+        {% if user.is_admin %}
+          <td>
+            <form method="post" action="{% url 'cleanup_archive' v.id %}" style="display:inline"
+                  onsubmit="var r=prompt('Archive {{ v.key|escapejs }} from {{ v.environment.name|escapejs }} — reason? (kept & restorable)'); if(r===null){return false;} this.reason.value=r;">
+              {% csrf_token %}
+              <input type="hidden" name="reason">
+              <button class="btn small danger">Archive</button>
+            </form>
+          </td>
+        {% endif %}
+      </tr>
+    {% empty %}
+      <tr><td colspan="{% if user.is_admin %}6{% else %}5{% endif %}" class="muted">
+        Nothing flagged. Run <code>keymaker scan</code> against a codebase to populate this.
+      </td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

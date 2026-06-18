@@ -1,0 +1,62 @@
+{% extends "vars/base.html" %}
+{% block title %}Compare · Keymaker{% endblock %}
+{% block content %}
+<div class="env-header">
+  <h2>Compare environments</h2>
+  <label class="chk small"><input type="checkbox" id="diffs-only"
+    onchange="document.querySelector('.matrix').classList.toggle('diffs-only', this.checked)"> Show differences only</label>
+</div>
+
+<form method="get" action="{% url 'compare' %}" class="env-picker">
+  {% for e in environments %}
+    <label class="chk pill-chk">
+      <input type="checkbox" name="env" value="{{ e.slug }}"
+             {% if e.slug in selected_slugs %}checked{% endif %}
+             onchange="this.form.submit()">
+      {{ e.name }}
+    </label>
+  {% endfor %}
+</form>
+
+{% if selected %}
+<div class="matrix-wrap">
+  <table class="matrix">
+    <thead>
+      <tr>
+        <th class="key-col">Key</th>
+        {% for e in selected %}<th>{{ e.name }}<div class="muted small">{{ e.slug }}</div></th>{% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+        <tr class="{% if row.differs %}differs{% else %}same{% endif %}">
+          <td class="key-col">{{ row.key }}</td>
+          {% for cell in row.cells %}
+            <td class="{% if not cell.var %}missing{% endif %}">
+              {% if not cell.var %}
+                <span class="muted">—</span>
+              {% elif cell.var.is_secret %}
+                <span x-data="{ revealed:false, value:'' }">
+                  <span x-show="!revealed" class="masked">••••••</span>
+                  <code x-show="revealed" x-text="value"></code>
+                  <button class="icon-btn"
+                          @click="if(!revealed){ value = await (await fetch('{% url 'variable_reveal' cell.env.slug cell.var.id %}')).text(); } revealed=!revealed"
+                          x-text="revealed ? '🙈' : '👁'"></button>
+                </span>
+              {% else %}
+                <code>{{ cell.var.value }}</code>
+              {% endif %}
+            </td>
+          {% endfor %}
+        </tr>
+      {% empty %}
+        <tr><td colspan="{{ selected|length|add:1 }}" class="muted">No variables in the selected environments.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<p class="muted small">Rows highlighted differ across the selected environments (different value, or missing in one).</p>
+{% else %}
+  <p class="muted">Select two or more environments to compare.</p>
+{% endif %}
+{% endblock %}

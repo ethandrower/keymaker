@@ -1,0 +1,117 @@
+{% extends "vars/base.html" %}
+{% block title %}{{ env.name }} · Keymaker{% endblock %}
+{% block content %}
+<div class="env-header">
+  <div>
+    <h2>{{ env.name }} <span class="muted small">/ {{ env.slug }}</span></h2>
+    {% if env.description %}<p class="muted">{{ env.description }}</p>{% endif %}
+  </div>
+  <div class="env-meta" x-data="{ managed: false }">
+    <span class="pill">rev {{ env.revision }}</span>
+    <span class="pill">{{ env.get_kind_display }}</span>
+    <a class="btn small primary"
+       :href="managed ? '{% url 'environment_download' env.slug %}?include_managed=1' : '{% url 'environment_download' env.slug %}'"
+       title="Download this environment as a .env file">⬇ Download .env</a>
+    <label class="chk small" title="Include externally-managed keys (DATABASE_URL, REDIS_URL)">
+      <input type="checkbox" x-model="managed"> incl. managed
+    </label>
+  </div>
+</div>
+
+<section class="targets">
+  <h3>Targets <span class="muted small">where this env runs</span></h3>
+  <table class="mini">
+    <thead><tr><th>Label</th><th>Host / IP</th><th>Dokku app</th><th>Domain</th></tr></thead>
+    <tbody>
+      {% for t in env.targets.all %}
+        <tr>
+          <td>{{ t.label }}{% if t.local_only %} <span class="badge">local</span>{% endif %}</td>
+          <td>{{ t.host|default:"—" }}</td>
+          <td><code>{{ t.dokku_app|default:"—" }}</code></td>
+          <td>{{ t.domain|default:"—" }}</td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="4" class="muted">No targets defined.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if user.is_admin %}
+    <details class="add-target">
+      <summary>+ Add target</summary>
+      <form method="post" action="{% url 'target_save' env.slug %}" class="inline-form">
+        {% csrf_token %}
+        <input name="label" placeholder="Label (e.g. Staging box)" required>
+        <input name="host" placeholder="IP / host">
+        <input name="dokku_app" placeholder="dokku app">
+        <input name="domain" placeholder="domain">
+        <label class="chk"><input type="checkbox" name="local_only"> local only</label>
+        <button type="submit">Save</button>
+      </form>
+    </details>
+  {% endif %}
+</section>
+
+<section class="variables"
+         x-data="{ open: false, form: { id:'', key:'', value:'', is_secret:true } }"
+         @edit-var.window="open=true; form={ id:$event.detail.id, key:$event.detail.key, value:'', is_secret:$event.detail.is_secret }">
+  <div class="section-bar">
+    <h3>Variables</h3>
+    {% if user.is_admin %}
+      <button class="btn primary small" @click="open=true; form={id:'',key:'',value:'',is_secret:true}">+ Add variable</button>
+    {% endif %}
+  </div>
+
+  {% if user.is_admin %}
+    <div class="var-editor" x-show="open" x-cloak>
+      <form hx-post="{% url 'variable_save' env.slug %}" hx-target="#var-rows" hx-swap="outerHTML"
+            @htmx:after-request="if($event.detail.successful){ open=false }">
+        <input type="hidden" name="id" :value="form.id">
+        <input name="key" placeholder="KEY" x-model="form.key" :readonly="form.id" required>
+        <input name="value" placeholder="value" x-model="form.value"
+               :placeholder="form.id ? 'new value (leave blank to keep)' : 'value'">
+        <label class="chk"><input type="checkbox" name="is_secret" x-model="form.is_secret"> secret</label>
+        <button type="submit" class="btn primary">Save</button>
+        <button type="button" class="btn" @click="open=false">Cancel</button>
+      </form>
+    </div>
+  {% endif %}
+
+  <table class="vars-table">
+    <thead>
+      <tr>
+        <th>Key</th><th>Value</th>{% if user.is_admin %}<th>Actions</th>{% endif %}
+      </tr>
+    </thead>
+    {% include "vars/_variable_rows.html" %}
+  </table>
+</section>
+
+{% if archived %}
+<section class="archived">
+  <details>
+    <summary>🗄 Archived ({{ archived|length }}) <span class="muted small">— soft-deleted; restorable</span></summary>
+    <table class="mini">
+      <thead><tr><th>Key</th><th>Archived by</th><th>When</th><th>Reason</th>{% if user.is_admin %}<th></th>{% endif %}</tr></thead>
+      <tbody>
+        {% for v in archived %}
+          <tr>
+            <td><code>{{ v.key }}</code> {% if v.is_secret %}<span class="badge secret">secret</span>{% endif %}</td>
+            <td class="muted">{{ v.archived_by|default:"—" }}</td>
+            <td class="muted small">{{ v.archived_at|date:"Y-m-d H:i" }}</td>
+            <td class="muted">{{ v.archived_reason|default:"—" }}</td>
+            {% if user.is_admin %}
+              <td>
+                <form method="post" action="{% url 'variable_restore' env.slug v.id %}" style="display:inline">
+                  {% csrf_token %}
+                  <button class="btn small" type="submit">Restore</button>
+                </form>
+              </td>
+            {% endif %}
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
+</section>
+{% endif %}
+{% endblock %}
