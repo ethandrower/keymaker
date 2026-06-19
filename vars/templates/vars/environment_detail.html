@@ -101,10 +101,35 @@
          @edit-var.window="open=true; form={ id:$event.detail.id, key:$event.detail.key, value:'', is_secret:$event.detail.is_secret, target:$event.detail.target, label:$event.detail.label }">
   <div class="section-bar">
     <h3>Variables</h3>
-    {% if user.is_admin %}
-      <button class="btn primary small" @click="open=true; form={id:'',key:'',value:'',is_secret:true,target:'',label:''}">+ Add variable</button>
-    {% endif %}
+    <div style="display:flex; gap:10px; align-items:center">
+      {% if targets %}
+        <form method="get" style="display:inline">
+          <label class="muted small">liveness vs
+            <select name="live" onchange="this.form.submit()">
+              <option value="">—</option>
+              {% for t in targets %}<option value="{{ t.label }}" {% if t.label == live_target %}selected{% endif %}>{{ t.label }}</option>{% endfor %}
+            </select>
+          </label>
+        </form>
+      {% endif %}
+      {% if user.is_admin %}
+        <button class="btn primary small" @click="open=true; form={id:'',key:'',value:'',is_secret:true,target:'',label:''}">+ Add variable</button>
+      {% endif %}
+    </div>
   </div>
+  {% if live_target %}
+    {% if live_status is None %}
+      <p class="muted small"><span class="badge unused">no check yet</span> for <code>{{ live_target }}</code> — runs once the drift cron is wired.</p>
+    {% else %}
+      <p class="muted small">
+        Liveness vs <code>{{ live_target }}</code> (checked {{ live_checked_at|date:"Y-m-d H:i" }}):
+        <span class="live-dot live">●</span> live ·
+        <span class="live-dot drifted">●</span> drifted ·
+        <span class="live-dot pending">○</span> not on box
+        {% if on_box_new %}<br><strong>On box but not in Keymaker:</strong> {{ on_box_new|join:", " }} <em>(adopt via Sync)</em>{% endif %}
+      </p>
+    {% endif %}
+  {% endif %}
 
   {% if user.is_admin %}
     <div class="var-editor" x-show="open" x-cloak>

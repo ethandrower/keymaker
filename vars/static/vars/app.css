@@ -82,6 +82,10 @@ th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: upp
 .badge.target { color: var(--accent); border-color: var(--accent); }
 .vars-table tr.label-head td { background: var(--panel); color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; padding-top: 14px; }
 .vars-table td.scope { white-space: nowrap; }
+.live-dot { font-size: 11px; margin-right: 4px; }
+.live-dot.live { color: var(--ok); }
+.live-dot.drifted { color: var(--warn); }
+.live-dot.pending { color: var(--muted); }
 
 /* Var editor */
 .var-editor { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-bottom: 12px; }

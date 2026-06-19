@@ -37,6 +37,9 @@ Swapped in by HTMX after edits. `variables` is ordered by (label, key).{% endcom
           {% endif %}
         </td>
         <td class="scope">
+          {% if v.live == "live" %}<span class="live-dot live" title="Live on the target — matches the box">●</span>
+          {% elif v.live == "drifted" %}<span class="live-dot drifted" title="Drifted — box value differs">●</span>
+          {% elif v.live == "pending" %}<span class="live-dot pending" title="Not yet applied on the box">○</span>{% endif %}
           {% if v.target_id %}<span class="badge target">{{ v.target.label }}</span>
           {% else %}<span class="muted small">all targets</span>{% endif %}
         </td>

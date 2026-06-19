@@ -89,21 +89,47 @@ def _env_target(env, ident):
         env.targets.filter(label=ident).first()
 
 
+def _liveness(env, target_label):
+    """Per-key live/drifted/pending status for a target, from its latest drift check.
+    Returns (status_dict, on_box_new_list, checked_at) or (None, [], None) if never checked."""
+    from .models import DriftCheck
+    dc = DriftCheck.objects.filter(environment=env, target_label=target_label).first()
+    if not dc:
+        return None, [], None
+    status = {k: "drifted" for k in dc.value_mismatch}
+    for k in dc.in_keymaker_only:
+        status.setdefault(k, "pending")
+    return status, dc.on_box_only, dc.checked_at
+
+
 @login_required
 def environment_detail(request, slug):
     env = get_object_or_404(Environment, slug=slug)
-    # active_vars() is ordered by (group, key) so the template can {% regroup %}.
+    targets = env.targets.all()
+    # Liveness: default to the only target for single-target envs, else honor ?live=.
+    live_target = request.GET.get("live") or (targets[0].label if len(targets) == 1 else "")
+    live_status, on_box_new, live_checked_at = _liveness(env, live_target) if live_target else (None, [], None)
+    # active_vars() is ordered by (label, key) so the template can {% regroup %}.
+    variables = list(env.active_vars())
+    for v in variables:
+        applies = (v.target_id is None) or (v.target and v.target.label == live_target)
+        v.live = (live_status.get(v.key, "live")
+                  if (live_status is not None and applies and not v.is_managed) else None)
     return render(
         request,
         "vars/environment_detail.html",
         {
             "environments": _nav_environments(),
             "env": env,
-            "variables": env.active_vars(),
-            "targets": env.targets.all(),
+            "variables": variables,
+            "targets": targets,
             "archived": env.variables.filter(archived=True),
             "user": request.appuser,
             "managed_keys": settings.KEYMAKER_MANAGED_KEYS,
+            "live_target": live_target,
+            "live_status": live_status,        # None = never checked; else {key: drifted|pending}
+            "on_box_new": on_box_new,          # keys on the box not in Keymaker
+            "live_checked_at": live_checked_at,
         },
     )
 
