@@ -29,6 +29,7 @@ urlpatterns = [
     path("environments/<slug:slug>/targets/<int:target_id>/delete", views.target_delete, name="target_delete"),
 
     # Audit
+    path("checks/", views.checks, name="checks"),
     path("audit/", views.audit_log, name="audit_log"),
 
     # Agent/client API

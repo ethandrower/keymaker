@@ -407,6 +407,33 @@ def cleanup_archive(request, var_id):
     return redirect("cleanup")
 
 
+# --- checks (drift) -------------------------------------------------------
+
+@login_required
+def checks(request):
+    """Per-target drift status: latest check, in-sync/drift, and staleness."""
+    from .models import DriftCheck
+    latest = {}
+    for c in DriftCheck.objects.select_related("environment"):  # ordered -checked_at
+        latest.setdefault((c.environment_id, c.target_label), c)
+    now = timezone.now()
+    stale_after = timezone.timedelta(days=2)
+    rows = []
+    for env in _nav_environments():
+        for t in env.targets.all():
+            c = latest.get((env.id, t.label))
+            rows.append({
+                "env": env, "target": t, "check": c,
+                "stale": c is None or (now - c.checked_at) > stale_after,
+                "never": c is None,
+            })
+    return render(
+        request,
+        "vars/checks.html",
+        {"environments": _nav_environments(), "rows": rows, "user": request.appuser},
+    )
+
+
 # --- audit ----------------------------------------------------------------
 
 @login_required

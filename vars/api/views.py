@@ -10,7 +10,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from ..exporters import render_dotenv
-from ..models import AuditLog, Environment, Target, Variable
+from ..models import AuditLog, DriftCheck, Environment, Target, Variable
 
 
 class TargetNotFound(Exception):
@@ -86,6 +86,34 @@ class TargetsView(APIView):
                             environment=slug, detail=label)
         return Response({"id": target.id, "label": target.label, "created": created},
                         status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+class DriftView(APIView):
+    """Receive a drift report from the keymaker-drift client (key names only)."""
+
+    def post(self, request, slug):
+        env = get_object_or_404(Environment, slug=slug)
+        try:
+            target = _resolve_target(env, request.data.get("target"))
+        except TargetNotFound as exc:
+            return Response({"detail": f"No target '{exc}' in {env.slug}."},
+                            status=status.HTTP_404_NOT_FOUND)
+        on_box = list(request.data.get("on_box_only") or [])
+        km_only = list(request.data.get("in_keymaker_only") or [])
+        mismatch = list(request.data.get("value_mismatch") or [])
+        check = DriftCheck.objects.create(
+            environment=env,
+            target_label=target.label if target else "",
+            on_box_only=on_box, in_keymaker_only=km_only, value_mismatch=mismatch,
+            in_sync=not (on_box or km_only or mismatch),
+        )
+        AuditLog.record(
+            actor=str(request.user), action="drift_check", environment=env.slug,
+            detail=(f"{target.label if target else 'all'}: " +
+                    ("in sync" if check.in_sync else
+                     f"{len(on_box)} new on box, {len(km_only)} missing, {len(mismatch)} changed")),
+        )
+        return Response({"in_sync": check.in_sync, "drift": check.drift_count})
 
 
 class RevisionView(APIView):

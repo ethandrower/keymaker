@@ -169,6 +169,27 @@ class Variable(models.Model):
         self.save(update_fields=["archived", "archived_at", "archived_by", "archived_reason"])
 
 
+class DriftCheck(models.Model):
+    """A drift report from the keymaker-drift client: how a target's live config
+    compares to what Keymaker holds. Stores key NAMES only, never values."""
+
+    environment = models.ForeignKey(Environment, related_name="drift_checks", on_delete=models.CASCADE)
+    target_label = models.CharField(max_length=120, blank=True)
+    checked_at = models.DateTimeField(default=timezone.now)
+    on_box_only = models.JSONField(default=list)        # set on the box, absent from Keymaker (new!)
+    in_keymaker_only = models.JSONField(default=list)   # in Keymaker, missing on the box
+    value_mismatch = models.JSONField(default=list)     # present both sides, different value
+    in_sync = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["-checked_at"]
+        indexes = [models.Index(fields=["environment", "target_label", "-checked_at"])]
+
+    @property
+    def drift_count(self):
+        return len(self.on_box_only) + len(self.in_keymaker_only) + len(self.value_mismatch)
+
+
 class AuditLog(models.Model):
     """Append-only record of who changed what, when."""
 

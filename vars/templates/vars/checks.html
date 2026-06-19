@@ -1,0 +1,40 @@
+{% extends "vars/base.html" %}
+{% block title %}Checks · Keymaker{% endblock %}
+{% block content %}
+<div class="env-header"><h2>Drift checks</h2></div>
+<p class="muted">A scheduled job on the Keymaker host compares each target's live
+  Dokku config against what Keymaker holds. <strong>New on box</strong> = keys set
+  directly on the server that aren't in Keymaker yet (candidates to adopt).
+  A <span class="badge unused">stale</span> badge means the check hasn't reported
+  recently — the cron may have stopped.</p>
+
+<table class="mini">
+  <thead><tr><th>Environment</th><th>Target</th><th>Last checked</th><th>Status</th><th>New on box / drift</th></tr></thead>
+  <tbody>
+    {% for r in rows %}
+      <tr>
+        <td>{{ r.env.name }}</td>
+        <td><code>{{ r.target.label }}</code></td>
+        <td class="muted small">
+          {% if r.never %}never{% else %}{{ r.check.checked_at|date:"Y-m-d H:i" }}{% endif %}
+          {% if r.stale %} <span class="badge unused">stale</span>{% endif %}
+        </td>
+        <td>
+          {% if r.never %}<span class="muted">—</span>
+          {% elif r.check.in_sync %}<span class="badge" style="color:var(--ok);border-color:var(--ok)">in sync</span>
+          {% else %}<span class="badge" style="color:var(--warn);border-color:var(--warn)">drift ({{ r.check.drift_count }})</span>{% endif %}
+        </td>
+        <td class="muted small">
+          {% if r.check and not r.check.in_sync %}
+            {% if r.check.on_box_only %}<div><strong>new on box:</strong> {{ r.check.on_box_only|join:", " }}</div>{% endif %}
+            {% if r.check.in_keymaker_only %}<div>missing on box: {{ r.check.in_keymaker_only|join:", " }}</div>{% endif %}
+            {% if r.check.value_mismatch %}<div>value drift: {{ r.check.value_mismatch|join:", " }}</div>{% endif %}
+          {% endif %}
+        </td>
+      </tr>
+    {% empty %}
+      <tr><td colspan="5" class="muted">No targets to check yet.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
