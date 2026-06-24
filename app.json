@@ -1,0 +1,10 @@
+{
+  "name": "keymaker",
+  "description": "Environment & secret management for CiteMed.",
+  "cron": [
+    {
+      "command": "python manage.py drift_check",
+      "schedule": "0 7 * * *"
+    }
+  ]
+}

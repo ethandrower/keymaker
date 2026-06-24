@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
-# Registers the dedicated keymaker-drift public key on the Dokku hosts and installs
-# the daily drift-check cron on the Keymaker host. Run this ONCE, from a machine
-# with root SSH to the hosts. The matching private key already lives in the
-# Keymaker app config (KEYMAKER_SSH_KEY_B64) — this only deals with the public key.
+# Registers the dedicated keymaker-drift public key on the Dokku hosts so the
+# drift_check command can SSH in to read live config. Run this ONCE, from a
+# machine with root SSH to the hosts. The matching private key already lives in
+# the Keymaker app config (KEYMAKER_SSH_KEY_B64) — this only deals with the
+# public key.
+#
+# Scheduling is NOT installed here: the daily drift run is defined in app.json's
+# `cron` block and applied automatically by Dokku on deploy. This script only
+# verifies that cron registered and kicks off a first run.
 #
 #   bash client/setup-drift.sh
 #
@@ -23,11 +28,15 @@ for h in "${DOKKU_HOSTS[@]}"; do
     echo "    (already present or failed — check manually)"
 done
 
-echo "==> Installing daily drift-check cron on the Keymaker host ($KEYMAKER_HOST)"
+echo "==> Verifying the app.json drift-check cron registered on the Keymaker host ($KEYMAKER_HOST)"
 ssh "root@$KEYMAKER_HOST" '
-  CRON="17 7 * * * dokku run keymaker python manage.py drift_check >> /var/log/keymaker-drift.log 2>&1"
-  ( crontab -l 2>/dev/null | grep -v "manage.py drift_check"; echo "$CRON" ) | crontab -
-  echo "  cron installed:"; crontab -l | grep drift_check
+  if dokku cron:list keymaker 2>/dev/null | grep -q "manage.py drift_check"; then
+    echo "  cron present:"; dokku cron:list keymaker | grep drift_check
+  else
+    echo "  WARNING: no drift_check cron found. Ensure app.json deployed and your"
+    echo "  Dokku version supports cron (>= 0.25). Re-deploy, or add a host crontab"
+    echo "  as a fallback: 0 7 * * * dokku run keymaker python manage.py drift_check"
+  fi
 '
 
 echo "==> Kicking off a first drift run now"

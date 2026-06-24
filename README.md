@@ -185,6 +185,23 @@ See [`client/README.md`](client/README.md). It runs on each Dokku host, polls
 `/revision`, and applies changes via `dokku config:set` — never touching
 `DATABASE_URL`/`REDIS_URL`.
 
+## Drift detection
+
+A scheduled job compares each target's **live** Dokku config against what Keymaker
+holds and records the differences as `DriftCheck` rows (key **names** only, never
+values) — surfacing keys set directly on a box, missing keys, and value drift on
+the **Checks** page and per-key liveness badges.
+
+- **Schedule** — defined in [`app.json`](app.json)'s `cron` block (daily 07:00
+  UTC), applied automatically by Dokku on deploy. No host crontab to maintain.
+  Verify with `dokku cron:list keymaker`; run on demand with
+  `dokku run keymaker python manage.py drift_check`.
+- **SSH access** — the command SSHes into each Dokku host as a restricted `dokku`
+  user. Set `KEYMAKER_SSH_KEY_B64` (base64 of the private key) on the Keymaker
+  app, and run [`client/setup-drift.sh`](client/setup-drift.sh) **once** to
+  register the matching public key on the hosts. Without this, drift checks
+  record an error instead of data.
+
 ## Deploying on Dokku
 
 Deploys as its own app with its own Postgres (same playbook as the other CiteMed

@@ -12,8 +12,9 @@ dokku_app, so it knows exactly what to check.
 SSH: set config var KEYMAKER_SSH_KEY_B64 (base64 of a private key authorized as a
 `dokku` ssh-key on the Dokku hosts). Falls back to the ambient SSH config.
 
-Schedule on the Keymaker host, e.g. daily:
-    0 7 * * *  dokku run keymaker python manage.py drift_check
+Scheduled by Dokku from the `cron` block in app.json (daily 07:00 UTC) — no
+host crontab needed. Verify with `dokku cron:list keymaker`. Run by hand any
+time with `dokku run keymaker python manage.py drift_check`.
 """
 import base64
 import json
