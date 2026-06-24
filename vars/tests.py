@@ -1,4 +1,6 @@
 """Tests for keymaker core behavior."""
+import json
+
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
@@ -146,6 +148,125 @@ class ApiTests(TestCase):
         ov = Variable(environment=self.env, key="X", target=self.box); ov.set_value("o"); ov.save()
         self.assertEqual(self.env.resolved_for(None)["X"].value, "b")
         self.assertEqual(self.env.resolved_for(self.box)["X"].value, "o")
+
+
+@override_settings(KEYMAKER_MASTER_KEYS=[TEST_KEY], KEYMAKER_MANAGED_KEYS=["DATABASE_URL"],
+                   KEYMAKER_KEY=API_KEY)
+class InventoryTests(TestCase):
+    def setUp(self):
+        crypto._fernet = None
+        self.env = Environment.objects.create(slug="staging", name="Staging")
+        v = Variable(environment=self.env, key="SECRET_KEY"); v.set_value("abc"); v.save()
+        m = Variable(environment=self.env, key="DATABASE_URL", is_managed=True)
+        m.set_value("postgres://x"); m.save()
+        Target.objects.create(environment=self.env, label="boxA", dokku_app="app-a", host="1.2.3.4")
+        Environment.objects.create(slug="old", name="Old", archived=True)
+
+    def _client(self):
+        c = APIClient()
+        c.credentials(HTTP_AUTHORIZATION=f"Bearer {API_KEY}")
+        return c
+
+    def test_inventory_lists_envs_and_servers(self):
+        resp = self._client().get("/api/v1/inventory")
+        self.assertEqual(resp.status_code, 200)
+        envs = resp.json()["environments"]
+        # Archived env hidden by default.
+        slugs = {e["slug"] for e in envs}
+        self.assertEqual(slugs, {"staging"})
+        staging = envs[0]
+        self.assertEqual(staging["variable_count"], 1)   # SECRET_KEY; managed excluded
+        self.assertEqual(staging["managed_count"], 1)
+        self.assertEqual(staging["targets"][0]["dokku_app"], "app-a")
+        self.assertIsNone(staging["targets"][0]["latest_drift"])
+
+    def test_inventory_never_includes_values(self):
+        body = self._client().get("/api/v1/inventory").content.decode()
+        self.assertNotIn("abc", body)
+        self.assertNotIn("postgres://x", body)
+
+    def test_inventory_include_archived(self):
+        resp = self._client().get("/api/v1/inventory?include_archived=1")
+        slugs = {e["slug"] for e in resp.json()["environments"]}
+        self.assertEqual(slugs, {"staging", "old"})
+
+
+@override_settings(KEYMAKER_MASTER_KEYS=[TEST_KEY], KEYMAKER_MANAGED_KEYS=["DATABASE_URL"],
+                   KEYMAKER_KEY=API_KEY)
+class McpTests(TestCase):
+    def setUp(self):
+        crypto._fernet = None
+        self.env = Environment.objects.create(slug="staging", name="Staging")
+        v = Variable(environment=self.env, key="SECRET_KEY"); v.set_value("abc"); v.save()
+
+    def _rpc(self, method, params=None, req_id=1, key=API_KEY):
+        body = {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params or {}}
+        kwargs = {"content_type": "application/json"}
+        if key is not None:
+            kwargs["HTTP_AUTHORIZATION"] = f"Bearer {key}"
+        return self.client.post("/mcp", data=json.dumps(body), **kwargs)
+
+    def _call(self, name, arguments=None):
+        resp = self._rpc("tools/call", {"name": name, "arguments": arguments or {}})
+        self.assertEqual(resp.status_code, 200)
+        return resp.json()["result"]
+
+    def test_requires_key(self):
+        resp = self._rpc("tools/list", key=None)
+        self.assertEqual(resp.status_code, 401)
+
+    def test_initialize_advertises_tools(self):
+        result = self._rpc("initialize").json()["result"]
+        self.assertEqual(result["serverInfo"]["name"], "keymaker")
+        self.assertIn("tools", result["capabilities"])
+
+    def test_tools_list(self):
+        tools = self._rpc("tools/list").json()["result"]["tools"]
+        names = {t["name"] for t in tools}
+        self.assertIn("keymaker_inventory", names)
+        self.assertIn("keymaker_get_variables", names)
+        # Handler must never leak into the public schema.
+        self.assertNotIn("handler", tools[0])
+
+    def test_notification_gets_no_body(self):
+        body = json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        resp = self.client.post("/mcp", data=body, content_type="application/json",
+                                HTTP_AUTHORIZATION=f"Bearer {API_KEY}")
+        self.assertEqual(resp.status_code, 202)
+
+    def test_get_variables_returns_values(self):
+        result = self._call("keymaker_get_variables", {"environment": "staging"})
+        data = result["structuredContent"]
+        self.assertEqual(data["variables"]["SECRET_KEY"], "abc")
+
+    def test_set_variable_bumps_revision(self):
+        before = self.env.revision
+        result = self._call("keymaker_set_variable",
+                            {"environment": "staging", "key": "NEW", "value": "v", "is_secret": False})
+        self.assertTrue(result["structuredContent"]["created"])
+        self.env.refresh_from_db()
+        self.assertEqual(self.env.revision, before + 1)
+
+    def test_set_managed_key_is_error(self):
+        result = self._call("keymaker_set_variable",
+                            {"environment": "staging", "key": "DATABASE_URL", "value": "x"})
+        self.assertTrue(result["isError"])
+
+    def test_archive_variable(self):
+        result = self._call("keymaker_archive_variable",
+                            {"environment": "staging", "key": "SECRET_KEY"})
+        self.assertTrue(result["structuredContent"]["archived"])
+        self.assertTrue(Variable.objects.get(key="SECRET_KEY").archived)
+
+    def test_unknown_tool_rejected(self):
+        resp = self._rpc("tools/call", {"name": "keymaker_nope", "arguments": {}})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("error", resp.json())
+
+    def test_inventory_tool(self):
+        result = self._call("keymaker_inventory")
+        slugs = {e["slug"] for e in result["structuredContent"]["environments"]}
+        self.assertEqual(slugs, {"staging"})
 
 
 class SyncDiffTests(TestCase):

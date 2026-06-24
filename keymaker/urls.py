@@ -2,6 +2,7 @@ from django.urls import include, path
 
 from vars import views
 from vars.api import urls as api_urls
+from vars.mcp import mcp_endpoint
 
 urlpatterns = [
     path("", views.home, name="home"),
@@ -34,4 +35,7 @@ urlpatterns = [
 
     # Agent/client API
     path("api/v1/", include(api_urls)),
+
+    # MCP server (streamable HTTP transport) — same bearer key as the REST API
+    path("mcp", mcp_endpoint, name="mcp"),
 ]

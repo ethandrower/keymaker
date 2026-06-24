@@ -106,6 +106,7 @@ with. All list/read endpoints serve **active** (non-archived) variables.
 
 | Method | Path | Notes |
 | --- | --- | --- |
+| `GET` | `/api/v1/inventory` | One-shot fleet snapshot: every env + its servers (targets), revision, var counts, latest drift per server. **Names/counts only, no values.** `?include_archived=1` |
 | `GET` | `/api/v1/environments/<slug>/revision` | Cheap change poll; `{revision}` + ETag |
 | `GET` | `/api/v1/environments/<slug>/variables` | JSON; `?format=dotenv` for `.env` text; managed keys excluded unless `?include_managed=1` |
 | `PUT` | `/api/v1/environments/<slug>/variables/<KEY>` | Upsert. Body `{"value": "...", "is_secret": true}` |
@@ -141,6 +142,32 @@ curl -s -X PUT  -H "Authorization: Bearer $KEYMAKER_KEY" -H "Content-Type: appli
 curl -s -X DELETE -H "Authorization: Bearer $KEYMAKER_KEY" \
   -d '{"reason":"removed in PR #123"}' "$KEYMAKER_URL/api/v1/environments/staging/variables/MY_KEY"
 ```
+
+### MCP — native tools for Claude Code
+
+Keymaker also speaks **MCP** at `POST /mcp` (the "streamable HTTP" transport). This
+is *not* a separate process — it's one more route in the same Django app, behind the
+same bearer key. Point any Claude Code at it once and it discovers the tools itself:
+
+```bash
+claude mcp add --transport http keymaker \
+  https://keymaker.citemed.com/mcp -H "Authorization: Bearer $KEYMAKER_KEY"
+```
+
+Tools exposed (discoverable via `tools/list`):
+
+| Tool | Does |
+| --- | --- |
+| `keymaker_inventory` | Whole-fleet snapshot — envs, servers, revisions, var counts, drift. **No values.** Start here. |
+| `keymaker_list_environments` | Lighter env list (slug, name, revision). |
+| `keymaker_get_variables` | Resolved key/values for an env (optional `target`, `include_managed`). |
+| `keymaker_check_revision` | Current revision — cheap change check. |
+| `keymaker_set_variable` | Upsert a key (optional `target`, `label`). Bumps revision. |
+| `keymaker_archive_variable` | Soft-delete a key (restorable in the UI). Bumps revision. |
+
+The MCP tools wrap the same logic as the REST API, so behavior never diverges:
+managed keys (`DATABASE_URL`/`REDIS_URL`) are read-only, `archive` never destroys,
+and the inventory tool returns key *names* and counts only — never secret values.
 
 Two CLIs in `client/` (stdlib-only, run with `python3`, each has `--help`); both
 read `KEYMAKER_KEY` from the environment:

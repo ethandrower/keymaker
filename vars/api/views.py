@@ -17,6 +17,62 @@ class TargetNotFound(Exception):
     pass
 
 
+def _latest_drift(env, target_label):
+    """The most recent DriftCheck for one target (by label), or None."""
+    return (
+        env.drift_checks.filter(target_label=target_label)
+        .order_by("-checked_at")
+        .first()
+    )
+
+
+def build_inventory(*, include_archived=False):
+    """One-shot snapshot of every environment, its servers (targets), and sync state.
+
+    Shared by the REST `GET /inventory` endpoint and the MCP `keymaker_inventory`
+    tool so the two never drift. Values are never included — names and counts only.
+    """
+    envs = Environment.objects.all().prefetch_related("targets")
+    if not include_archived:
+        envs = envs.filter(archived=False)
+
+    inventory = []
+    for env in envs:
+        active = list(env.active_vars())
+        targets = []
+        for t in env.targets.all():
+            drift = _latest_drift(env, t.label)
+            targets.append({
+                "id": t.id,
+                "label": t.label,
+                "host": t.host,
+                "dokku_app": t.dokku_app,
+                "domain": t.domain,
+                "local_only": t.local_only,
+                "latest_drift": None if drift is None else {
+                    "checked_at": drift.checked_at.isoformat(),
+                    "in_sync": drift.in_sync,
+                    "drift_count": drift.drift_count,
+                    "on_box_only": drift.on_box_only,
+                    "in_keymaker_only": drift.in_keymaker_only,
+                    "value_mismatch": drift.value_mismatch,
+                },
+            })
+        inventory.append({
+            "slug": env.slug,
+            "name": env.name,
+            "kind": env.kind,
+            "description": env.description,
+            "revision": env.revision,
+            "archived": env.archived,
+            "updated_at": env.updated_at.isoformat(),
+            "variable_count": sum(1 for v in active if not v.is_managed),
+            "managed_count": sum(1 for v in active if v.is_managed),
+            "targets": targets,
+        })
+    return {"environments": inventory}
+
+
 def _resolve_target(env, ident):
     """Map a ?target= / body 'target' identifier to a Target in this env.
 
@@ -57,6 +113,24 @@ class EnvironmentsView(APIView):
             AuditLog.record(actor=str(request.user), action="env_create", environment=slug)
         return Response({"slug": env.slug, "created": created},
                         status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+class InventoryView(APIView):
+    """One-shot inventory of every environment + its servers (targets) + sync state.
+
+    The agent-friendly "what's out there" call: a single request returns the whole
+    fleet so a client needn't loop /environments then /targets per env. Names and
+    counts only — never values.
+    """
+
+    def get(self, request):
+        include_archived = request.query_params.get("include_archived") == "1"
+        data = build_inventory(include_archived=include_archived)
+        AuditLog.record(
+            actor=str(request.user), action="api_inventory",
+            detail=f"{len(data['environments'])} environments",
+        )
+        return Response(data)
 
 
 class TargetsView(APIView):
