@@ -7,7 +7,7 @@ from rest_framework.test import APIClient
 from cryptography.fernet import Fernet
 
 from . import crypto
-from .models import Environment, Target, Variable
+from .models import DriftCheck, Environment, Target, Variable
 
 TEST_KEY = Fernet.generate_key().decode()
 API_KEY = "test-keymaker-key"
@@ -267,6 +267,216 @@ class McpTests(TestCase):
         result = self._call("keymaker_inventory")
         slugs = {e["slug"] for e in result["structuredContent"]["environments"]}
         self.assertEqual(slugs, {"staging"})
+
+
+@override_settings(KEYMAKER_MASTER_KEYS=[TEST_KEY], KEYMAKER_MANAGED_KEYS=["DATABASE_URL"],
+                   KEYMAKER_KEY=API_KEY)
+class ContractApiTests(TestCase):
+    """The agent/client-facing endpoints not covered above: /environments, /targets,
+    /drift, /audit, and the /revision ETag. These are the surface a dev-team agent
+    fleet drives, so the request/response contract is locked down here."""
+
+    def setUp(self):
+        crypto._fernet = None
+        self.env = Environment.objects.create(slug="staging", name="Staging")
+        used = Variable(environment=self.env, key="USED_KEY"); used.set_value("u"); used.save()
+        orphan = Variable(environment=self.env, key="ORPHAN_KEY"); orphan.set_value("o"); orphan.save()
+        self.box = Target.objects.create(environment=self.env, label="boxA", dokku_app="app-a",
+                                         host="1.2.3.4")
+
+    def _client(self, key=API_KEY):
+        c = APIClient()
+        c.credentials(HTTP_AUTHORIZATION=f"Bearer {key}")
+        return c
+
+    # --- /environments create (idempotent) ---
+
+    def test_create_environment_idempotent(self):
+        c = self._client()
+        first = c.post("/api/v1/environments", {"slug": "prod", "name": "Prod"}, format="json")
+        self.assertEqual(first.status_code, 201)
+        self.assertTrue(first.json()["created"])
+        again = c.post("/api/v1/environments", {"slug": "prod"}, format="json")
+        self.assertEqual(again.status_code, 200)
+        self.assertFalse(again.json()["created"])
+        self.assertEqual(Environment.objects.filter(slug="prod").count(), 1)
+
+    def test_create_environment_requires_slug(self):
+        resp = self._client().post("/api/v1/environments", {"name": "no slug"}, format="json")
+        self.assertEqual(resp.status_code, 400)
+
+    # --- /targets list + create (idempotent) ---
+
+    def test_targets_list(self):
+        resp = self._client().get("/api/v1/environments/staging/targets")
+        self.assertEqual(resp.status_code, 200)
+        labels = {t["label"] for t in resp.json()["targets"]}
+        self.assertEqual(labels, {"boxA"})
+
+    def test_create_target_idempotent(self):
+        c = self._client()
+        first = c.post("/api/v1/environments/staging/targets",
+                       {"label": "boxB", "dokku_app": "app-b", "host": "5.6.7.8"}, format="json")
+        self.assertEqual(first.status_code, 201)
+        self.assertTrue(first.json()["created"])
+        again = c.post("/api/v1/environments/staging/targets", {"label": "boxB"}, format="json")
+        self.assertEqual(again.status_code, 200)
+        self.assertFalse(again.json()["created"])
+        self.assertEqual(self.env.targets.filter(label="boxB").count(), 1)
+
+    def test_create_target_requires_label(self):
+        resp = self._client().post("/api/v1/environments/staging/targets",
+                                   {"host": "1.1.1.1"}, format="json")
+        self.assertEqual(resp.status_code, 400)
+
+    # --- /revision ETag ---
+
+    def test_revision_sets_etag(self):
+        resp = self._client().get("/api/v1/environments/staging/revision")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp["ETag"], f'"{self.env.revision}"')
+        self.assertEqual(resp.json()["revision"], self.env.revision)
+
+    def test_revision_etag_tracks_writes(self):
+        c = self._client()
+        before = c.get("/api/v1/environments/staging/revision")["ETag"]
+        c.put("/api/v1/environments/staging/variables/NEW",
+              {"value": "v", "is_secret": False}, format="json")
+        after = c.get("/api/v1/environments/staging/revision")["ETag"]
+        self.assertNotEqual(before, after)
+
+    # --- /drift report intake ---
+
+    def test_drift_records_check(self):
+        resp = self._client().post(
+            "/api/v1/environments/staging/drift",
+            {"target": "boxA", "on_box_only": ["SNUCK_IN"],
+             "in_keymaker_only": ["GONE"], "value_mismatch": ["CHANGED"]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertFalse(body["in_sync"])
+        self.assertEqual(body["drift"], 3)
+        check = DriftCheck.objects.get(environment=self.env, target_label="boxA")
+        self.assertEqual(check.on_box_only, ["SNUCK_IN"])
+
+    def test_drift_in_sync_when_empty(self):
+        resp = self._client().post("/api/v1/environments/staging/drift",
+                                   {"target": "boxA"}, format="json")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json()["in_sync"])
+
+    def test_drift_unknown_target_404(self):
+        resp = self._client().post("/api/v1/environments/staging/drift",
+                                   {"target": "ghost", "on_box_only": ["X"]}, format="json")
+        self.assertEqual(resp.status_code, 404)
+        self.assertFalse(DriftCheck.objects.filter(environment=self.env).exists())
+
+    def test_drift_never_stores_values(self):
+        # Names only — even if a client mistakenly sends values, only names land.
+        self._client().post("/api/v1/environments/staging/drift",
+                            {"target": "boxA", "on_box_only": ["SNUCK_IN"]}, format="json")
+        body = str(DriftCheck.objects.get(environment=self.env, target_label="boxA").on_box_only)
+        self.assertIn("SNUCK_IN", body)
+
+    # --- /audit scan intake (the reconciler contract) ---
+
+    def test_audit_flags_unused_clears_used(self):
+        resp = self._client().post(
+            "/api/v1/environments/staging/audit",
+            {"results": {
+                "USED_KEY": {"used": True, "references": 3},
+                "ORPHAN_KEY": {"used": False, "note": "no refs found"},
+            }},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["flagged_unused"], ["ORPHAN_KEY"])
+        self.assertNotIn("USED_KEY", body["flagged_unused"])
+        orphan = self.env.variables.get(key="ORPHAN_KEY")
+        self.assertTrue(orphan.suspected_unused)
+        self.assertEqual(orphan.audit_note, "no refs found")
+        used = self.env.variables.get(key="USED_KEY")
+        self.assertFalse(used.suspected_unused)
+        self.assertIsNotNone(used.last_seen_at)
+
+    def test_audit_reports_missing_in_store(self):
+        resp = self._client().post(
+            "/api/v1/environments/staging/audit",
+            {"results": {}, "missing": ["USED_KEY", "TOTALLY_NEW_KEY"]},
+            format="json",
+        )
+        # USED_KEY is in the store, so only the genuinely-absent key is reported.
+        self.assertEqual(resp.json()["missing_in_store"], ["TOTALLY_NEW_KEY"])
+
+    def test_audit_leaves_unmentioned_keys_untouched(self):
+        # A scan that only mentions ORPHAN_KEY must not touch USED_KEY.
+        self._client().post("/api/v1/environments/staging/audit",
+                            {"results": {"ORPHAN_KEY": {"used": False}}}, format="json")
+        used = self.env.variables.get(key="USED_KEY")
+        self.assertIsNone(used.last_audit_at)
+
+    def test_audit_requires_key(self):
+        resp = APIClient().post("/api/v1/environments/staging/audit",
+                                {"results": {}}, format="json")
+        self.assertEqual(resp.status_code, 401)
+
+
+@override_settings(KEYMAKER_MASTER_KEYS=[TEST_KEY], KEYMAKER_KEY=API_KEY)
+class McpBatchTests(TestCase):
+    """JSON-RPC batch + malformed-input handling on the MCP route — the paths an
+    agent client can trigger that the happy-path MCP tests don't exercise."""
+
+    def setUp(self):
+        crypto._fernet = None
+        self.env = Environment.objects.create(slug="staging", name="Staging")
+
+    def _post(self, payload):
+        return self.client.post("/mcp", data=json.dumps(payload),
+                                content_type="application/json",
+                                HTTP_AUTHORIZATION=f"Bearer {API_KEY}")
+
+    def test_valid_batch_returns_array(self):
+        resp = self._post([
+            {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        ])
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIsInstance(data, list)
+        self.assertEqual({r["id"] for r in data}, {1, 2})
+
+    def test_batch_of_only_notifications_is_202(self):
+        resp = self._post([{"jsonrpc": "2.0", "method": "notifications/initialized"}])
+        self.assertEqual(resp.status_code, 202)
+
+    def test_malformed_batch_item_does_not_crash(self):
+        # A bare number where an object is expected must yield an Invalid Request
+        # error, not a 500. Regression test for non-dict batch items.
+        resp = self._post([1, {"jsonrpc": "2.0", "id": 7, "method": "ping"}])
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(len(data), 2)
+        errors = [r for r in data if "error" in r]
+        self.assertTrue(any(r["error"]["code"] == -32600 for r in errors))
+
+    def test_parse_error_is_400(self):
+        resp = self.client.post("/mcp", data="{not json",
+                                content_type="application/json",
+                                HTTP_AUTHORIZATION=f"Bearer {API_KEY}")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()["error"]["code"], -32700)
+
+    def test_unknown_method_returns_method_not_found(self):
+        resp = self._post({"jsonrpc": "2.0", "id": 1, "method": "does/not/exist"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["error"]["code"], -32601)
+
+    def test_get_is_405(self):
+        resp = self.client.get("/mcp", HTTP_AUTHORIZATION=f"Bearer {API_KEY}")
+        self.assertEqual(resp.status_code, 405)
 
 
 class SyncDiffTests(TestCase):

@@ -244,6 +244,10 @@ def _error(req_id, code, message):
 def _handle(message):
     """Dispatch a single JSON-RPC request. Returns a response dict, or None for
     notifications (which get no reply)."""
+    if not isinstance(message, dict):
+        # A malformed item (e.g. a bare number/string in a batch). Per JSON-RPC,
+        # reply with an Invalid Request error rather than crashing the request.
+        return _error(None, -32600, "Invalid Request")
     method = message.get("method")
     req_id = message.get("id")
     params = message.get("params") or {}
