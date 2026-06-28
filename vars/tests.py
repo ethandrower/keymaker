@@ -498,9 +498,10 @@ class DriftCheckCommandTests(TestCase):
                                          dokku_app="app-a", host="1.2.3.4")
 
     def _run(self, live, **kw):
+        import io
         from django.core.management import call_command
         with mock.patch(f"{self.MOD}._dokku_config", return_value=live):
-            call_command("drift_check", **kw)
+            call_command("drift_check", stdout=io.StringIO(), stderr=io.StringIO(), **kw)
 
     def test_in_sync_when_live_matches(self):
         self._run({"SECRET_KEY": "km", "API_TOKEN": "km-tok"})
@@ -511,10 +512,8 @@ class DriftCheckCommandTests(TestCase):
         self.assertEqual(check.value_mismatch, [])
 
     def test_detects_all_three_drift_kinds(self):
-        # API_TOKEN changed on the box, SECRET_KEY missing on the box, EXTRA snuck in.
-        self._run({"SECRET_KEY": "km", "API_TOKEN": "changed", "EXTRA": "x"})
-        # value mismatch case needs SECRET_KEY present-but-different; redo precisely:
-        DriftCheck.objects.all().delete()
+        # API_TOKEN value changed on the box, SECRET_KEY missing on the box (in
+        # Keymaker only), EXTRA snuck in directly on the box.
         self._run({"API_TOKEN": "changed", "EXTRA": "x"})
         check = DriftCheck.objects.get(environment=self.env, target_label="boxA")
         self.assertFalse(check.in_sync)
@@ -531,10 +530,12 @@ class DriftCheckCommandTests(TestCase):
         self.assertNotIn("DATABASE_URL", check.in_keymaker_only)
 
     def test_ssh_error_records_nothing_and_does_not_crash(self):
+        import io
         from django.core.management import call_command
         with mock.patch(f"{self.MOD}._dokku_config",
                         side_effect=RuntimeError("ssh boom")):
-            call_command("drift_check")  # must not raise
+            call_command("drift_check", stdout=io.StringIO(),
+                         stderr=io.StringIO())  # must not raise
         self.assertFalse(DriftCheck.objects.filter(environment=self.env).exists())
 
     def test_target_without_host_is_skipped(self):
@@ -789,3 +790,93 @@ class UiTests(TestCase):
         self.client.post(f"/cleanup/{flagged.id}/archive", {"reason": "unused"})
         flagged.refresh_from_db()
         self.assertTrue(flagged.archived)
+
+
+class ScanReconcileTests(TestCase):
+    """The keymaker_scan reconciler's pure scanning brain (no Keymaker/LLM/network):
+    reference counting, MISSING-key extraction, dynamic-access detection, and the
+    directory/extension filtering that keeps .env declarations from self-confirming."""
+
+    @staticmethod
+    def _mod():
+        import importlib.util
+        import pathlib
+
+        path = pathlib.Path(__file__).resolve().parent.parent / "client" / "keymaker_scan.py"
+        spec = importlib.util.spec_from_file_location("keymaker_scan", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def _tree(self, files):
+        """Write {relpath: content} into a temp dir and return its path."""
+        import tempfile
+        import os
+        root = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, root, True)
+        for rel, content in files.items():
+            full = os.path.join(root, rel)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "w") as fh:
+                fh.write(content)
+        return root
+
+    def test_prefix_of(self):
+        mod = self._mod()
+        self.assertEqual(mod.prefix_of("AWS_SECRET_KEY"), "AWS")
+        self.assertEqual(mod.prefix_of("PORT"), "PORT")
+
+    def test_counts_literal_references(self):
+        mod = self._mod()
+        root = self._tree({"app.py": "x = os.environ['USED_KEY']\nprint(USED_KEY)\n"})
+        counts, samples, _, _ = mod.scan_tree(root, {"USED_KEY", "ABSENT_KEY"})
+        self.assertEqual(counts["USED_KEY"], 2)
+        self.assertEqual(counts["ABSENT_KEY"], 0)
+        self.assertTrue(samples["USED_KEY"])  # file:line recorded
+
+    def test_extracts_referenced_keys_for_missing(self):
+        mod = self._mod()
+        root = self._tree({
+            "a.py": "os.environ.get('IN_STORE')\nos.getenv('NOT_IN_STORE')\n",
+            "b.js": "const u = process.env.NODE_KEY\n",
+        })
+        _, _, referenced, _ = mod.scan_tree(root, {"IN_STORE"})
+        self.assertIn("NOT_IN_STORE", referenced)
+        self.assertIn("NODE_KEY", referenced)
+        self.assertIn("IN_STORE", referenced)
+
+    def test_detects_dynamic_access(self):
+        mod = self._mod()
+        root = self._tree({"dyn.py": "name = 'X'\nval = os.getenv(name)\n"})
+        _, _, _, dynamic = mod.scan_tree(root, {"SOME_KEY"})
+        self.assertTrue(dynamic)
+
+    def test_no_dynamic_for_literal_only(self):
+        mod = self._mod()
+        root = self._tree({"lit.py": "val = os.getenv('LITERAL_KEY')\n"})
+        _, _, _, dynamic = mod.scan_tree(root, {"LITERAL_KEY"})
+        self.assertFalse(dynamic)
+
+    def test_dotenv_files_not_scanned(self):
+        # .env DECLARES values; counting it would mark every key trivially "used".
+        mod = self._mod()
+        root = self._tree({".env": "SECRET_KEY=abc\n", "app.py": "pass\n"})
+        counts, _, _, _ = mod.scan_tree(root, {"SECRET_KEY"})
+        self.assertEqual(counts["SECRET_KEY"], 0)
+
+    def test_skip_dirs_excluded_from_source_scan(self):
+        mod = self._mod()
+        root = self._tree({
+            "app.py": "os.environ['REAL']\n",
+            "node_modules/pkg/index.js": "process.env.REAL\n",
+        })
+        counts, _, _, _ = mod.scan_tree(root, {"REAL"})
+        self.assertEqual(counts["REAL"], 1)  # node_modules not walked in source mode
+
+    def test_deps_scan_counts_but_does_not_mine(self):
+        mod = self._mod()
+        root = self._tree({"pkg/lib.py": "os.environ['DEP_KEY']\nos.getenv('OTHER')\n"})
+        counts, _, referenced, dynamic = mod.scan_tree(root, {"DEP_KEY"}, scanning_deps=True)
+        self.assertEqual(counts["DEP_KEY"], 1)      # references still counted
+        self.assertEqual(referenced, set())          # but referenced/dynamic not mined
+        self.assertFalse(dynamic)
