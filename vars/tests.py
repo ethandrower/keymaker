@@ -1,5 +1,6 @@
 """Tests for keymaker core behavior."""
 import json
+from unittest import mock
 
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
@@ -477,6 +478,121 @@ class McpBatchTests(TestCase):
     def test_get_is_405(self):
         resp = self.client.get("/mcp", HTTP_AUTHORIZATION=f"Bearer {API_KEY}")
         self.assertEqual(resp.status_code, 405)
+
+
+@override_settings(KEYMAKER_MASTER_KEYS=[TEST_KEY], KEYMAKER_MANAGED_KEYS=["DATABASE_URL"])
+class DriftCheckCommandTests(TestCase):
+    """The drift_check management command. SSH/Dokku is mocked so the comparison,
+    error handling, and config parsing are exercised without a real host."""
+
+    MOD = "vars.management.commands.drift_check"
+
+    def setUp(self):
+        crypto._fernet = None
+        self.env = Environment.objects.create(slug="staging", name="Staging")
+        for k, v in {"SECRET_KEY": "km", "API_TOKEN": "km-tok"}.items():
+            var = Variable(environment=self.env, key=k); var.set_value(v); var.save()
+        m = Variable(environment=self.env, key="DATABASE_URL", is_managed=True)
+        m.set_value("postgres://x"); m.save()
+        self.box = Target.objects.create(environment=self.env, label="boxA",
+                                         dokku_app="app-a", host="1.2.3.4")
+
+    def _run(self, live, **kw):
+        from django.core.management import call_command
+        with mock.patch(f"{self.MOD}._dokku_config", return_value=live):
+            call_command("drift_check", **kw)
+
+    def test_in_sync_when_live_matches(self):
+        self._run({"SECRET_KEY": "km", "API_TOKEN": "km-tok"})
+        check = DriftCheck.objects.get(environment=self.env, target_label="boxA")
+        self.assertTrue(check.in_sync)
+        self.assertEqual(check.on_box_only, [])
+        self.assertEqual(check.in_keymaker_only, [])
+        self.assertEqual(check.value_mismatch, [])
+
+    def test_detects_all_three_drift_kinds(self):
+        # API_TOKEN changed on the box, SECRET_KEY missing on the box, EXTRA snuck in.
+        self._run({"SECRET_KEY": "km", "API_TOKEN": "changed", "EXTRA": "x"})
+        # value mismatch case needs SECRET_KEY present-but-different; redo precisely:
+        DriftCheck.objects.all().delete()
+        self._run({"API_TOKEN": "changed", "EXTRA": "x"})
+        check = DriftCheck.objects.get(environment=self.env, target_label="boxA")
+        self.assertFalse(check.in_sync)
+        self.assertEqual(check.on_box_only, ["EXTRA"])
+        self.assertEqual(check.in_keymaker_only, ["SECRET_KEY"])
+        self.assertEqual(check.value_mismatch, ["API_TOKEN"])
+
+    def test_managed_keys_excluded_from_comparison(self):
+        # Even though DATABASE_URL is in Keymaker and absent from live, it is
+        # managed and must not register as drift.
+        self._run({"SECRET_KEY": "km", "API_TOKEN": "km-tok"})
+        check = DriftCheck.objects.get(environment=self.env, target_label="boxA")
+        self.assertTrue(check.in_sync)
+        self.assertNotIn("DATABASE_URL", check.in_keymaker_only)
+
+    def test_ssh_error_records_nothing_and_does_not_crash(self):
+        from django.core.management import call_command
+        with mock.patch(f"{self.MOD}._dokku_config",
+                        side_effect=RuntimeError("ssh boom")):
+            call_command("drift_check")  # must not raise
+        self.assertFalse(DriftCheck.objects.filter(environment=self.env).exists())
+
+    def test_target_without_host_is_skipped(self):
+        Target.objects.create(environment=self.env, label="local", local_only=True)
+        self._run({"SECRET_KEY": "km", "API_TOKEN": "km-tok"})
+        # Only boxA (which has a host + dokku_app) gets a check.
+        self.assertFalse(DriftCheck.objects.filter(target_label="local").exists())
+        self.assertTrue(DriftCheck.objects.filter(target_label="boxA").exists())
+
+    def test_env_filter_limits_scope(self):
+        other = Environment.objects.create(slug="prod", name="Prod")
+        Target.objects.create(environment=other, label="prodbox",
+                              dokku_app="app-p", host="9.9.9.9")
+        self._run({"SECRET_KEY": "km", "API_TOKEN": "km-tok"}, env="staging")
+        self.assertTrue(DriftCheck.objects.filter(environment=self.env).exists())
+        self.assertFalse(DriftCheck.objects.filter(environment=other).exists())
+
+
+class DriftConfigParsingTests(TestCase):
+    """The _dokku_config / _meaningful helpers: JSON path, envfile fallback, and
+    the noise filter — pure parsing, subprocess mocked."""
+
+    MOD = "vars.management.commands.drift_check"
+
+    @staticmethod
+    def _cmd():
+        import importlib
+        return importlib.import_module("vars.management.commands.drift_check")
+
+    def test_meaningful_filters_noise(self):
+        c = self._cmd()
+        cfg = {"REAL": "v", "DATABASE_URL": "x", "REDIS_URL": "y", "PORT": "8000",
+               "DOKKU_PROXY_PORT": "80", "GIT_REV": "abc"}
+        self.assertEqual(c._meaningful(cfg), {"REAL": "v"})
+
+    def test_dokku_config_parses_json(self):
+        c = self._cmd()
+        proc = mock.Mock(returncode=0, stdout='{"REAL": "v", "PORT": "8000"}', stderr="")
+        with mock.patch(f"{self.MOD}.subprocess.run", return_value=proc):
+            out = c._dokku_config(["ssh"], "host", "app")
+        self.assertEqual(out, {"REAL": "v"})
+
+    def test_dokku_config_falls_back_to_envfile(self):
+        c = self._cmd()
+        bad_json = mock.Mock(returncode=0, stdout="not json", stderr="")
+        envfile = mock.Mock(returncode=0,
+                            stdout="export REAL='v'\nPORT=8000\n# comment\n", stderr="")
+        with mock.patch(f"{self.MOD}.subprocess.run", side_effect=[bad_json, envfile]):
+            out = c._dokku_config(["ssh"], "host", "app")
+        self.assertEqual(out, {"REAL": "v"})
+
+    def test_dokku_config_raises_on_failure(self):
+        c = self._cmd()
+        bad_json = mock.Mock(returncode=1, stdout="", stderr="boom")
+        fail = mock.Mock(returncode=1, stdout="", stderr="ssh denied")
+        with mock.patch(f"{self.MOD}.subprocess.run", side_effect=[bad_json, fail]):
+            with self.assertRaises(RuntimeError):
+                c._dokku_config(["ssh"], "host", "app")
 
 
 class SyncDiffTests(TestCase):
