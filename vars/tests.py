@@ -7,7 +7,7 @@ from rest_framework.test import APIClient
 
 from cryptography.fernet import Fernet
 
-from . import crypto
+from . import auth, crypto
 from .models import DriftCheck, Environment, Target, Variable
 
 TEST_KEY = Fernet.generate_key().decode()
@@ -624,3 +624,168 @@ class SyncDiffTests(TestCase):
         to_set, to_unset = mod.compute_changes(desired, current, mod.ALWAYS_IGNORE)
         self.assertEqual(to_set, {})  # A unchanged
         self.assertEqual(to_unset, [])  # managed keys not unset
+
+
+@override_settings(
+    KEYMAKER_MASTER_KEYS=[TEST_KEY], KEYMAKER_MANAGED_KEYS=["DATABASE_URL"],
+    KEYMAKER_KEY=API_KEY,
+    # Tests run without a built staticfiles manifest; use the plain backend so
+    # {% static %} doesn't demand a collectstatic manifest entry.
+    STATICFILES_STORAGE="django.contrib.staticfiles.storage.StaticFilesStorage",
+)
+class UiTests(TestCase):
+    """Server-rendered UI: auth gating, page smoke renders, and the HTMX/form
+    mutations the dev team will use day to day. Login is session-based."""
+
+    def setUp(self):
+        crypto._fernet = None
+        self.env = Environment.objects.create(slug="staging", name="Staging")
+        self.secret = Variable(environment=self.env, key="SECRET_KEY", is_secret=True)
+        self.secret.set_value("plaintext-secret"); self.secret.save()
+        self.managed = Variable(environment=self.env, key="DATABASE_URL", is_managed=True)
+        self.managed.set_value("postgres://x"); self.managed.save()
+        self.box = Target.objects.create(environment=self.env, label="boxA", dokku_app="app-a")
+
+    def _login(self):
+        resp = self.client.post("/login", {"key": API_KEY})
+        self.assertEqual(resp.status_code, 302)
+
+    # --- auth gating ---
+
+    def test_anonymous_redirected_to_login(self):
+        for path in ("/", f"/environments/{self.env.slug}/", "/compare/", "/cleanup/",
+                     "/checks/", "/audit/"):
+            resp = self.client.get(path)
+            self.assertEqual(resp.status_code, 302, path)
+            self.assertIn("/login", resp["Location"], path)
+
+    def test_login_wrong_key_rejected(self):
+        resp = self.client.post("/login", {"key": "nope"}, follow=True)
+        self.assertIsNone(auth.current_user(resp.wsgi_request))
+
+    def test_login_correct_key_then_home(self):
+        self._login()
+        # Now authed: home redirects to the first env.
+        resp = self.client.get("/")
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn(self.env.slug, resp["Location"])
+
+    def test_logout_clears_session(self):
+        self._login()
+        self.client.get("/logout")
+        self.assertEqual(self.client.get("/compare/").status_code, 302)
+
+    def test_non_admin_blocked_from_mutations(self):
+        from .models import AppUser
+        plain = AppUser.objects.create(username="readonly", is_admin=False)
+        session = self.client.session
+        session[auth.SESSION_USER_KEY] = plain.id
+        session.save()
+        resp = self.client.post(f"/environments/{self.env.slug}/variables/save",
+                                {"key": "X", "value": "y"})
+        self.assertEqual(resp.status_code, 403)
+
+    # --- page smoke renders ---
+
+    def test_pages_render(self):
+        self._login()
+        for path in (f"/environments/{self.env.slug}/", "/compare/", "/cleanup/",
+                     "/checks/", "/audit/"):
+            resp = self.client.get(path)
+            self.assertEqual(resp.status_code, 200, path)
+
+    def test_login_page_renders_for_anonymous(self):
+        resp = self.client.get("/login")
+        self.assertEqual(resp.status_code, 200)
+
+    # --- variable mutations ---
+
+    def test_variable_save_creates_and_bumps_revision(self):
+        self._login()
+        before = self.env.revision
+        resp = self.client.post(f"/environments/{self.env.slug}/variables/save",
+                                {"key": "NEW_KEY", "value": "v", "is_secret": ""})
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(self.env.active_vars().filter(key="NEW_KEY").exists())
+        self.env.refresh_from_db()
+        self.assertEqual(self.env.revision, before + 1)
+
+    def test_variable_save_requires_key(self):
+        self._login()
+        resp = self.client.post(f"/environments/{self.env.slug}/variables/save",
+                                {"key": "", "value": "v"})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_variable_save_rejects_managed(self):
+        self._login()
+        resp = self.client.post(f"/environments/{self.env.slug}/variables/save",
+                                {"id": self.managed.id, "key": "DATABASE_URL", "value": "x"})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_variable_save_get_is_405(self):
+        self._login()
+        resp = self.client.get(f"/environments/{self.env.slug}/variables/save")
+        self.assertEqual(resp.status_code, 405)
+
+    def test_variable_archive_then_restore(self):
+        self._login()
+        self.client.post(
+            f"/environments/{self.env.slug}/variables/{self.secret.id}/archive",
+            {"reason": "rotated"})
+        self.secret.refresh_from_db()
+        self.assertTrue(self.secret.archived)
+        self.client.post(
+            f"/environments/{self.env.slug}/variables/{self.secret.id}/restore")
+        self.secret.refresh_from_db()
+        self.assertFalse(self.secret.archived)
+
+    def test_variable_reveal_returns_plaintext(self):
+        self._login()
+        resp = self.client.get(
+            f"/environments/{self.env.slug}/variables/{self.secret.id}/reveal")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.content.decode(), "plaintext-secret")
+
+    def test_download_returns_dotenv_attachment(self):
+        self._login()
+        resp = self.client.get(f"/environments/{self.env.slug}/download")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("attachment", resp["Content-Disposition"])
+        self.assertIn("SECRET_KEY=plaintext-secret", resp.content.decode())
+        self.assertNotIn("DATABASE_URL", resp.content.decode())  # managed excluded by default
+
+    # --- environment + target management ---
+
+    def test_environment_create(self):
+        self._login()
+        self.client.post("/environments/new",
+                         {"name": "Production", "slug": "prod", "kind": "shared"})
+        self.assertTrue(Environment.objects.filter(slug="prod").exists())
+
+    def test_environment_archive_restore_delete(self):
+        self._login()
+        keep = Environment.objects.create(slug="keep", name="Keep")  # so a nav env survives
+        self.client.post(f"/environments/{self.env.slug}/archive")
+        self.env.refresh_from_db()
+        self.assertTrue(self.env.archived)
+        self.client.post(f"/environments/{self.env.slug}/restore")
+        self.env.refresh_from_db()
+        self.assertFalse(self.env.archived)
+        self.client.post(f"/environments/{self.env.slug}/delete")
+        self.assertFalse(Environment.objects.filter(slug=self.env.slug).exists())
+
+    def test_target_save_and_delete(self):
+        self._login()
+        self.client.post(f"/environments/{self.env.slug}/targets/save",
+                         {"label": "boxB", "dokku_app": "app-b", "host": "5.6.7.8"})
+        t = self.env.targets.get(label="boxB")
+        self.client.post(f"/environments/{self.env.slug}/targets/{t.id}/delete")
+        self.assertFalse(self.env.targets.filter(label="boxB").exists())
+
+    def test_cleanup_archive(self):
+        self._login()
+        flagged = Variable(environment=self.env, key="ORPHAN", suspected_unused=True)
+        flagged.set_value("o"); flagged.save()
+        self.client.post(f"/cleanup/{flagged.id}/archive", {"reason": "unused"})
+        flagged.refresh_from_db()
+        self.assertTrue(flagged.archived)
