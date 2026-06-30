@@ -32,7 +32,16 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-ALWAYS_IGNORE = {"DATABASE_URL", "REDIS_URL", "PORT", "DOKKU_PROXY_PORT_MAP"}
+# Keys Dokku sets/manages itself — never push or strip these. Must match the
+# import client (keymaker_import.py) and drift_check, otherwise a sync would try
+# to unset Dokku's own internal keys (DOKKU_*, GIT_REV) and restart the app.
+ALWAYS_IGNORE = {"DATABASE_URL", "REDIS_URL", "PORT", "GIT_REV", "DATABASE_DEFAULT_URL"}
+IGNORE_PREFIX = ("DOKKU_",)
+
+
+def is_ignored(key, ignore):
+    """A key Keymaker must never set or unset (managed/auto, or user-ignored)."""
+    return key in ignore or key.startswith(IGNORE_PREFIX)
 
 
 def cfg(name, default=None):
@@ -108,11 +117,11 @@ def compute_changes(desired, current, ignore):
     """Return (to_set: dict, to_unset: list) excluding ignored keys."""
     to_set = {}
     for k, v in desired.items():
-        if k in ignore:
+        if is_ignored(k, ignore):
             continue
         if current.get(k) != v:
             to_set[k] = v
-    to_unset = [k for k in current if k not in desired and k not in ignore]
+    to_unset = [k for k in current if k not in desired and not is_ignored(k, ignore)]
     return to_set, to_unset
 
 

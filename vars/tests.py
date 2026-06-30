@@ -626,6 +626,22 @@ class SyncDiffTests(TestCase):
         self.assertEqual(to_set, {})  # A unchanged
         self.assertEqual(to_unset, [])  # managed keys not unset
 
+    def test_dokku_auto_keys_never_unset(self):
+        """Regression: Dokku's own keys (DOKKU_*, GIT_REV) live on every box but
+        are never stored in Keymaker. The sync must leave them alone, not unset
+        them (which would strip routing/proxy config and force a restart). The
+        ignore rule must match the import client + drift_check."""
+        mod = self._mod()
+        desired = {"A": "1"}
+        current = {
+            "A": "1", "GIT_REV": "abc123", "DATABASE_DEFAULT_URL": "auto",
+            "DOKKU_APP_TYPE": "dockerfile", "DOKKU_PROXY_PORT": "80",
+            "DOKKU_PROXY_SSL_PORT": "443", "DOKKU_APP_RESTORE": "1",
+        }
+        to_set, to_unset = mod.compute_changes(desired, current, mod.ALWAYS_IGNORE)
+        self.assertEqual(to_set, {})
+        self.assertEqual(to_unset, [])  # not one Dokku/auto key proposed for unset
+
 
 @override_settings(
     KEYMAKER_MASTER_KEYS=[TEST_KEY], KEYMAKER_MANAGED_KEYS=["DATABASE_URL"],
