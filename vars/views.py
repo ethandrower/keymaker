@@ -439,19 +439,29 @@ def cleanup_archive(request, var_id):
 def checks(request):
     """Per-target drift status: latest check, in-sync/drift, and staleness."""
     from .models import DriftCheck
-    latest = {}
+    latest, previous = {}, {}
     for c in DriftCheck.objects.select_related("environment"):  # ordered -checked_at
-        latest.setdefault((c.environment_id, c.target_label), c)
+        key = (c.environment_id, c.target_label)
+        if key not in latest:
+            latest[key] = c
+        elif key not in previous:
+            previous[key] = c  # the run before the latest, for managed-key change diff
     now = timezone.now()
     stale_after = timezone.timedelta(days=2)
     rows = []
     for env in _nav_environments():
         for t in env.targets.all():
             c = latest.get((env.id, t.label))
+            p = previous.get((env.id, t.label))
+            managed_added, managed_gone = [], []
+            if c and p:
+                managed_added = sorted(set(c.dokku_managed) - set(p.dokku_managed))
+                managed_gone = sorted(set(p.dokku_managed) - set(c.dokku_managed))
             rows.append({
                 "env": env, "target": t, "check": c,
                 "stale": c is None or (now - c.checked_at) > stale_after,
                 "never": c is None,
+                "managed_added": managed_added, "managed_gone": managed_gone,
             })
     return render(
         request,

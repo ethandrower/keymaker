@@ -553,6 +553,29 @@ class DriftCheckCommandTests(TestCase):
         self.assertTrue(DriftCheck.objects.filter(environment=self.env).exists())
         self.assertFalse(DriftCheck.objects.filter(environment=other).exists())
 
+    def test_dokku_managed_surfaced_not_counted_as_drift(self):
+        # Dokku's own keys live on every box. They must be recorded under
+        # dokku_managed (visible), never as on_box_only drift, and never break in_sync.
+        self._run({"SECRET_KEY": "km", "API_TOKEN": "km-tok",
+                   "DOKKU_APP_TYPE": "dockerfile", "GIT_REV": "abc", "DATABASE_URL": "auto"})
+        check = DriftCheck.objects.get(environment=self.env, target_label="boxA")
+        self.assertTrue(check.in_sync)
+        self.assertEqual(check.on_box_only, [])
+        self.assertEqual(check.dokku_managed, ["DATABASE_URL", "DOKKU_APP_TYPE", "GIT_REV"])
+
+    def test_dokku_managed_change_recorded_and_audited(self):
+        # A new Dokku-managed key appearing on the box between runs must surface as a
+        # change (audit note) even though it is never synced.
+        self._run({"SECRET_KEY": "km", "API_TOKEN": "km-tok", "DOKKU_APP_TYPE": "dockerfile"})
+        self._run({"SECRET_KEY": "km", "API_TOKEN": "km-tok",
+                   "DOKKU_APP_TYPE": "dockerfile", "DOKKU_PROXY_PORT": "80"})
+        rows = list(DriftCheck.objects.filter(target_label="boxA").order_by("checked_at"))
+        self.assertEqual(rows[0].dokku_managed, ["DOKKU_APP_TYPE"])
+        self.assertEqual(rows[1].dokku_managed, ["DOKKU_APP_TYPE", "DOKKU_PROXY_PORT"])
+        from vars.models import AuditLog
+        self.assertTrue(AuditLog.objects.filter(action="drift_check",
+                                                detail__contains="dokku-managed +1").exists())
+
 
 class DriftConfigParsingTests(TestCase):
     """The _dokku_config / _meaningful helpers: JSON path, envfile fallback, and
@@ -572,11 +595,13 @@ class DriftConfigParsingTests(TestCase):
         self.assertEqual(c._meaningful(cfg), {"REAL": "v"})
 
     def test_dokku_config_parses_json(self):
+        # _dokku_config returns the RAW config (PORT included); the caller splits it
+        # into meaningful (compared) and dokku-managed (surfaced) keys.
         c = self._cmd()
         proc = mock.Mock(returncode=0, stdout='{"REAL": "v", "PORT": "8000"}', stderr="")
         with mock.patch(f"{self.MOD}.subprocess.run", return_value=proc):
             out = c._dokku_config(["ssh"], "host", "app")
-        self.assertEqual(out, {"REAL": "v"})
+        self.assertEqual(out, {"REAL": "v", "PORT": "8000"})
 
     def test_dokku_config_falls_back_to_envfile(self):
         c = self._cmd()
@@ -585,7 +610,14 @@ class DriftConfigParsingTests(TestCase):
                             stdout="export REAL='v'\nPORT=8000\n# comment\n", stderr="")
         with mock.patch(f"{self.MOD}.subprocess.run", side_effect=[bad_json, envfile]):
             out = c._dokku_config(["ssh"], "host", "app")
-        self.assertEqual(out, {"REAL": "v"})
+        self.assertEqual(out, {"REAL": "v", "PORT": "8000"})
+
+    def test_dokku_managed_extracts_dokku_keys(self):
+        c = self._cmd()
+        cfg = {"REAL": "v", "DATABASE_URL": "x", "PORT": "8000",
+               "DOKKU_PROXY_PORT": "80", "GIT_REV": "abc"}
+        self.assertEqual(c._dokku_managed(cfg),
+                         ["DATABASE_URL", "DOKKU_PROXY_PORT", "GIT_REV", "PORT"])
 
     def test_dokku_config_raises_on_failure(self):
         c = self._cmd()

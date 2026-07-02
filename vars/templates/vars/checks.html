@@ -5,11 +5,13 @@
 <p class="muted">A scheduled job on the Keymaker host compares each target's live
   Dokku config against what Keymaker holds. <strong>New on box</strong> = keys set
   directly on the server that aren't in Keymaker yet (candidates to adopt).
-  A <span class="badge unused">stale</span> badge means the check hasn't reported
-  recently — the cron may have stopped.</p>
+  <strong>Dokku-managed</strong> = keys Dokku owns (<code>DOKKU_*</code>, <code>GIT_REV</code>,
+  <code>DATABASE_URL</code>…) — shown for visibility and never synced; a change here means
+  the platform reconfigured the app. A <span class="badge unused">stale</span> badge means
+  the check hasn't reported recently — the cron may have stopped.</p>
 
 <table class="mini">
-  <thead><tr><th>Environment</th><th>Target</th><th>Last checked</th><th>Status</th><th>New on box / drift</th></tr></thead>
+  <thead><tr><th>Environment</th><th>Target</th><th>Last checked</th><th>Status</th><th>New on box / drift</th><th>Dokku-managed <span class="muted small">(read-only)</span></th></tr></thead>
   <tbody>
     {% for r in rows %}
       <tr>
@@ -31,9 +33,16 @@
             {% if r.check.value_mismatch %}<div>value drift: {{ r.check.value_mismatch|join:", " }}</div>{% endif %}
           {% endif %}
         </td>
+        <td class="muted small">
+          {% if r.check and r.check.dokku_managed %}
+            <span title="{{ r.check.dokku_managed|join:', ' }}">{{ r.check.dokku_managed|length }} key{{ r.check.dokku_managed|length|pluralize }}</span>
+            {% if r.managed_added %}<span class="badge" style="color:var(--warn);border-color:var(--warn)" title="{{ r.managed_added|join:', ' }}">+{{ r.managed_added|length }} new</span>{% endif %}
+            {% if r.managed_gone %}<span class="badge" title="{{ r.managed_gone|join:', ' }}">−{{ r.managed_gone|length }} gone</span>{% endif %}
+          {% elif r.check %}<span class="muted">—</span>{% endif %}
+        </td>
       </tr>
     {% empty %}
-      <tr><td colspan="5" class="muted">No targets to check yet.</td></tr>
+      <tr><td colspan="6" class="muted">No targets to check yet.</td></tr>
     {% endfor %}
   </tbody>
 </table>

@@ -179,6 +179,8 @@ class DriftCheck(models.Model):
     on_box_only = models.JSONField(default=list)        # set on the box, absent from Keymaker (new!)
     in_keymaker_only = models.JSONField(default=list)   # in Keymaker, missing on the box
     value_mismatch = models.JSONField(default=list)     # present both sides, different value
+    dokku_managed = models.JSONField(default=list)      # Dokku-owned keys seen on the box (DOKKU_*, GIT_REV,
+                                                        # DATABASE_URL…): surfaced for visibility, never synced
     in_sync = models.BooleanField(default=True)
 
     class Meta:

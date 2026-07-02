@@ -56,6 +56,7 @@ def build_inventory(*, include_archived=False):
                     "on_box_only": drift.on_box_only,
                     "in_keymaker_only": drift.in_keymaker_only,
                     "value_mismatch": drift.value_mismatch,
+                    "dokku_managed": drift.dokku_managed,
                 },
             })
         inventory.append({
@@ -175,10 +176,12 @@ class DriftView(APIView):
         on_box = list(request.data.get("on_box_only") or [])
         km_only = list(request.data.get("in_keymaker_only") or [])
         mismatch = list(request.data.get("value_mismatch") or [])
+        managed = list(request.data.get("dokku_managed") or [])  # surfaced, not drift
         check = DriftCheck.objects.create(
             environment=env,
             target_label=target.label if target else "",
             on_box_only=on_box, in_keymaker_only=km_only, value_mismatch=mismatch,
+            dokku_managed=managed,
             in_sync=not (on_box or km_only or mismatch),
         )
         AuditLog.record(
