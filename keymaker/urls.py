@@ -31,6 +31,7 @@ urlpatterns = [
 
     # Audit
     path("checks/", views.checks, name="checks"),
+    path("checks/run", views.checks_run, name="checks_run"),
     path("audit/", views.audit_log, name="audit_log"),
 
     # Agent/client API

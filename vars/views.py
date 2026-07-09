@@ -470,6 +470,65 @@ def checks(request):
     )
 
 
+@require_POST
+@login_required
+def checks_run(request):
+    """On-demand drift check for one environment (optionally one target). Runs the
+    same comparison as the scheduled cron, synchronously, and records DriftCheck
+    rows so the Checks page reflects reality right now.
+
+    Bounded by a wall-clock budget because it SSHes to each box in-request and the
+    web worker has a finite timeout; any targets not reached are reported so the
+    user can re-run. SSH failures (e.g. the drift key isn't registered on a host)
+    surface as visible errors instead of a silent 'never'."""
+    import os
+    import subprocess
+    import time
+
+    from . import drift
+
+    slug = request.POST.get("env")
+    target_label = (request.POST.get("target") or "").strip() or None
+    env = get_object_or_404(Environment, slug=slug)
+
+    targets = [t for t in env.targets.all() if t.host and t.dokku_app]
+    if target_label:
+        targets = [t for t in targets if t.label == target_label]
+
+    if not targets:
+        messages.info(request, f"{env.name}: no checkable targets (need a host + Dokku app).")
+        return redirect("checks")
+
+    # Fail fast on unreachable hosts, and cap total work so the request can't hang
+    # the worker (gunicorn default timeout is 30s).
+    ssh_base, tmp = drift.build_ssh_base(connect_timeout=8)
+    budget_s = 22.0
+    start = time.monotonic()
+    actor = f"drift-ui:{getattr(request.appuser, 'username', '') or 'user'}"
+    checked, errors, not_reached = 0, [], 0
+    try:
+        for t in targets:
+            if time.monotonic() - start > budget_s:
+                not_reached = len(targets) - checked - len(errors)
+                break
+            try:
+                drift.check_one(env, t, ssh_base, actor=actor)
+                checked += 1
+            except (RuntimeError, subprocess.TimeoutExpired) as exc:
+                errors.append(f"{t.label}: {str(exc)[:200]}")
+    finally:
+        if tmp:
+            os.unlink(tmp)
+
+    if checked:
+        messages.success(request, f"{env.name}: checked {checked} target(s).")
+    for e in errors:
+        messages.error(request, f"{env.name} — {e}")
+    if not_reached:
+        messages.info(request, f"{env.name}: {not_reached} target(s) not reached (time budget) — run again to finish.")
+    return redirect("checks")
+
+
 # --- audit ----------------------------------------------------------------
 
 @login_required

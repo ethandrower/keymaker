@@ -483,9 +483,10 @@ class McpBatchTests(TestCase):
 @override_settings(KEYMAKER_MASTER_KEYS=[TEST_KEY], KEYMAKER_MANAGED_KEYS=["DATABASE_URL"])
 class DriftCheckCommandTests(TestCase):
     """The drift_check management command. SSH/Dokku is mocked so the comparison,
-    error handling, and config parsing are exercised without a real host."""
+    error handling, and config parsing are exercised without a real host. The
+    comparison itself lives in vars.drift (shared with the on-demand UI check)."""
 
-    MOD = "vars.management.commands.drift_check"
+    MOD = "vars.drift"
 
     def setUp(self):
         crypto._fernet = None
@@ -500,7 +501,7 @@ class DriftCheckCommandTests(TestCase):
     def _run(self, live, **kw):
         import io
         from django.core.management import call_command
-        with mock.patch(f"{self.MOD}._dokku_config", return_value=live):
+        with mock.patch(f"{self.MOD}.dokku_config", return_value=live):
             call_command("drift_check", stdout=io.StringIO(), stderr=io.StringIO(), **kw)
 
     def test_in_sync_when_live_matches(self):
@@ -532,7 +533,7 @@ class DriftCheckCommandTests(TestCase):
     def test_ssh_error_records_nothing_and_does_not_crash(self):
         import io
         from django.core.management import call_command
-        with mock.patch(f"{self.MOD}._dokku_config",
+        with mock.patch(f"{self.MOD}.dokku_config",
                         side_effect=RuntimeError("ssh boom")):
             call_command("drift_check", stdout=io.StringIO(),
                          stderr=io.StringIO())  # must not raise
@@ -578,29 +579,29 @@ class DriftCheckCommandTests(TestCase):
 
 
 class DriftConfigParsingTests(TestCase):
-    """The _dokku_config / _meaningful helpers: JSON path, envfile fallback, and
+    """The dokku_config / meaningful helpers: JSON path, envfile fallback, and
     the noise filter — pure parsing, subprocess mocked."""
 
-    MOD = "vars.management.commands.drift_check"
+    MOD = "vars.drift"
 
     @staticmethod
     def _cmd():
         import importlib
-        return importlib.import_module("vars.management.commands.drift_check")
+        return importlib.import_module("vars.drift")
 
     def test_meaningful_filters_noise(self):
         c = self._cmd()
         cfg = {"REAL": "v", "DATABASE_URL": "x", "REDIS_URL": "y", "PORT": "8000",
                "DOKKU_PROXY_PORT": "80", "GIT_REV": "abc"}
-        self.assertEqual(c._meaningful(cfg), {"REAL": "v"})
+        self.assertEqual(c.meaningful(cfg), {"REAL": "v"})
 
     def test_dokku_config_parses_json(self):
-        # _dokku_config returns the RAW config (PORT included); the caller splits it
+        # dokku_config returns the RAW config (PORT included); the caller splits it
         # into meaningful (compared) and dokku-managed (surfaced) keys.
         c = self._cmd()
         proc = mock.Mock(returncode=0, stdout='{"REAL": "v", "PORT": "8000"}', stderr="")
         with mock.patch(f"{self.MOD}.subprocess.run", return_value=proc):
-            out = c._dokku_config(["ssh"], "host", "app")
+            out = c.dokku_config(["ssh"], "host", "app")
         self.assertEqual(out, {"REAL": "v", "PORT": "8000"})
 
     def test_dokku_config_falls_back_to_envfile(self):
@@ -609,14 +610,14 @@ class DriftConfigParsingTests(TestCase):
         envfile = mock.Mock(returncode=0,
                             stdout="export REAL='v'\nPORT=8000\n# comment\n", stderr="")
         with mock.patch(f"{self.MOD}.subprocess.run", side_effect=[bad_json, envfile]):
-            out = c._dokku_config(["ssh"], "host", "app")
+            out = c.dokku_config(["ssh"], "host", "app")
         self.assertEqual(out, {"REAL": "v", "PORT": "8000"})
 
     def test_dokku_managed_extracts_dokku_keys(self):
         c = self._cmd()
         cfg = {"REAL": "v", "DATABASE_URL": "x", "PORT": "8000",
                "DOKKU_PROXY_PORT": "80", "GIT_REV": "abc"}
-        self.assertEqual(c._dokku_managed(cfg),
+        self.assertEqual(c.dokku_managed(cfg),
                          ["DATABASE_URL", "DOKKU_PROXY_PORT", "GIT_REV", "PORT"])
 
     def test_dokku_config_raises_on_failure(self):
@@ -625,7 +626,79 @@ class DriftConfigParsingTests(TestCase):
         fail = mock.Mock(returncode=1, stdout="", stderr="ssh denied")
         with mock.patch(f"{self.MOD}.subprocess.run", side_effect=[bad_json, fail]):
             with self.assertRaises(RuntimeError):
-                c._dokku_config(["ssh"], "host", "app")
+                c.dokku_config(["ssh"], "host", "app")
+
+
+@override_settings(
+    KEYMAKER_MASTER_KEYS=[TEST_KEY], KEYMAKER_MANAGED_KEYS=["DATABASE_URL"],
+    KEYMAKER_KEY=API_KEY,
+    STATICFILES_STORAGE="django.contrib.staticfiles.storage.StaticFilesStorage",
+)
+class OnDemandCheckTests(TestCase):
+    """The Checks-page 'Check now' / 'Check all' buttons → checks_run view. Runs the
+    SAME comparison as the cron (vars.drift), synchronously; SSH is mocked."""
+
+    MOD = "vars.drift"
+
+    def setUp(self):
+        crypto._fernet = None
+        self.env = Environment.objects.create(slug="staging", name="Staging")
+        v = Variable(environment=self.env, key="SECRET_KEY"); v.set_value("km"); v.save()
+        self.box = Target.objects.create(environment=self.env, label="boxA",
+                                         dokku_app="app-a", host="1.2.3.4")
+
+    def _login(self):
+        self.assertEqual(self.client.post("/login", {"key": API_KEY}).status_code, 302)
+
+    def test_requires_login(self):
+        resp = self.client.post("/checks/run", {"env": "staging", "target": "boxA"})
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("/login", resp["Location"])
+        self.assertFalse(DriftCheck.objects.exists())
+
+    def test_check_now_records_a_row_and_redirects(self):
+        self._login()
+        with mock.patch(f"{self.MOD}.dokku_config", return_value={"SECRET_KEY": "km"}):
+            resp = self.client.post("/checks/run", {"env": "staging", "target": "boxA"})
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("/checks", resp["Location"])
+        dc = DriftCheck.objects.get(environment=self.env, target_label="boxA")
+        self.assertTrue(dc.in_sync)
+
+    def test_check_now_only_hits_the_named_target(self):
+        self._login()
+        Target.objects.create(environment=self.env, label="boxB", dokku_app="app-b", host="5.6.7.8")
+        with mock.patch(f"{self.MOD}.dokku_config", return_value={"SECRET_KEY": "km"}) as m:
+            self.client.post("/checks/run", {"env": "staging", "target": "boxA"})
+        self.assertEqual(m.call_count, 1)
+        self.assertTrue(DriftCheck.objects.filter(target_label="boxA").exists())
+        self.assertFalse(DriftCheck.objects.filter(target_label="boxB").exists())
+
+    def test_check_all_hits_every_target_in_env(self):
+        self._login()
+        Target.objects.create(environment=self.env, label="boxB", dokku_app="app-b", host="5.6.7.8")
+        with mock.patch(f"{self.MOD}.dokku_config", return_value={"SECRET_KEY": "km"}) as m:
+            self.client.post("/checks/run", {"env": "staging"})
+        self.assertEqual(m.call_count, 2)
+        self.assertEqual(DriftCheck.objects.count(), 2)
+
+    def test_ssh_error_is_surfaced_and_records_nothing(self):
+        self._login()
+        with mock.patch(f"{self.MOD}.dokku_config",
+                        side_effect=RuntimeError("Permission denied (publickey)")):
+            resp = self.client.post("/checks/run", {"env": "staging", "target": "boxA"}, follow=True)
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(DriftCheck.objects.exists())
+        self.assertContains(resp, "Permission denied")  # visible, not a silent 'never'
+
+    def test_target_without_host_is_not_checkable(self):
+        self._login()
+        env2 = Environment.objects.create(slug="localdev", name="Local")
+        Target.objects.create(environment=env2, label="local", local_only=True)
+        with mock.patch(f"{self.MOD}.dokku_config") as m:
+            self.client.post("/checks/run", {"env": "localdev"}, follow=True)
+        m.assert_not_called()
+        self.assertFalse(DriftCheck.objects.exists())
 
 
 class SyncDiffTests(TestCase):
