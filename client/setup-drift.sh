@@ -15,10 +15,14 @@
 # run dokku commands (read config), not a general shell.
 set -euo pipefail
 
-PUBKEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKpjcOVPxT0Atc4iv/GPpdrl+3wo5R9V/K0WYK3xtzyx keymaker-drift'
+PUBKEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHOOhTVBL8oGLQcMke/8iVGjTn+YYj14tfbQx0m3xDwi keymaker-drift'
 
-# Dokku hosts that hold drift targets (staging dev boxes + pre-prod + remington, prod).
-DOKKU_HOSTS=(178.105.80.165 161.35.106.225)
+# Dokku hosts that hold drift targets:
+#   178.105.80.165  — staging dev boxes + pre-prod + remington
+#   161.35.106.225  — production (ec-production-multi-tenant)
+#   178.105.250.204 — demo (ec-demo)
+# (scraper hosts have no dokku_app mapped, so drift_check skips them.)
+DOKKU_HOSTS=(178.105.80.165 161.35.106.225 178.105.250.204)
 KEYMAKER_HOST=116.203.82.103
 
 echo "==> Registering keymaker-drift key on Dokku hosts"
