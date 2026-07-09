@@ -933,6 +933,68 @@ class UiTests(TestCase):
         self.assertTrue(flagged.archived)
 
 
+@override_settings(
+    KEYMAKER_MASTER_KEYS=[TEST_KEY], KEYMAKER_MANAGED_KEYS=["DATABASE_URL"],
+    KEYMAKER_KEY=API_KEY,
+    STATICFILES_STORAGE="django.contrib.staticfiles.storage.StaticFilesStorage",
+)
+class EnvironmentDetailFilterTests(TestCase):
+    """The environment-detail 'show variables for <target>' filter scopes the table
+    to that target's resolved set: base (all-targets) vars, with the target's own
+    overrides shadowing the matching base key, and other targets' overrides hidden."""
+
+    def setUp(self):
+        crypto._fernet = None
+        self.env = Environment.objects.create(slug="lab", name="Lab")
+        self.tA = Target.objects.create(environment=self.env, label="dev-ethan", dokku_app="lab-ethan")
+        self.tB = Target.objects.create(environment=self.env, label="dev-mohamed", dokku_app="lab-mohamed")
+        # base var shared by all targets
+        self._var("SHARED", "base")
+        # same key overridden for A only -> A's view should show the override, not the base
+        self._var("DB_NAME", "base-db")
+        self._var("DB_NAME", "ethan-db", target=self.tA)
+        # a key only B overrides -> must NOT appear in A's view
+        self._var("SLACK_URL", "mohamed-hook", target=self.tB)
+
+    def _var(self, key, value, target=None):
+        v = Variable(environment=self.env, key=key, target=target)
+        v.set_value(value); v.save()
+        return v
+
+    def _login(self):
+        self.client.post("/login", {"key": API_KEY})
+
+    def _keys(self, resp):
+        return {v.key for v in resp.context["variables"]}
+
+    def test_all_targets_shows_everything(self):
+        self._login()
+        resp = self.client.get(f"/environments/{self.env.slug}/")
+        self.assertIsNone(resp.context["view_target"])
+        # both base DB_NAME and A's override are present in the unfiltered view
+        self.assertEqual(len([v for v in resp.context["variables"] if v.key == "DB_NAME"]), 2)
+        self.assertIn("SLACK_URL", self._keys(resp))
+
+    def test_filter_scopes_to_target_resolved_set(self):
+        self._login()
+        resp = self.client.get(f"/environments/{self.env.slug}/?target={self.tA.id}")
+        self.assertEqual(resp.context["view_target"].id, self.tA.id)
+        keys = self._keys(resp)
+        self.assertIn("SHARED", keys)      # inherited base
+        self.assertIn("DB_NAME", keys)     # overridden for A
+        self.assertNotIn("SLACK_URL", keys)  # B-only override hidden from A
+        # DB_NAME appears once, and it is A's override (not the base row)
+        dbrows = [v for v in resp.context["variables"] if v.key == "DB_NAME"]
+        self.assertEqual(len(dbrows), 1)
+        self.assertEqual(dbrows[0].target_id, self.tA.id)
+
+    def test_bad_target_id_falls_back_to_all(self):
+        self._login()
+        resp = self.client.get(f"/environments/{self.env.slug}/?target=999999")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNone(resp.context["view_target"])
+
+
 class ScanReconcileTests(TestCase):
     """The keymaker_scan reconciler's pure scanning brain (no Keymaker/LLM/network):
     reference counting, MISSING-key extraction, dynamic-access detection, and the

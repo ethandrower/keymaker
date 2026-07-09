@@ -106,11 +106,22 @@ def _liveness(env, target_label):
 def environment_detail(request, slug):
     env = get_object_or_404(Environment, slug=slug)
     targets = env.targets.all()
-    # Liveness: default to the only target for single-target envs, else honor ?live=.
-    live_target = request.GET.get("live") or (targets[0].label if len(targets) == 1 else "")
+    # Optional: scope the variable table to one target's resolved view (?target=<id>).
+    view_target = _env_target(env, request.GET.get("target"))
+    # Liveness: an explicit ?target= scopes it to that box; else honor ?live=;
+    # else default to the only target for single-target envs.
+    live_target = (view_target.label if view_target else
+                   request.GET.get("live") or (targets[0].label if len(targets) == 1 else ""))
     live_status, on_box_new, live_checked_at = _liveness(env, live_target) if live_target else (None, [], None)
     # active_vars() is ordered by (label, key) so the template can {% regroup %}.
     variables = list(env.active_vars())
+    if view_target:
+        # Resolved-for-target: base (all-targets) vars, with this target's overrides
+        # shadowing the matching base key; other targets' overrides are hidden.
+        override_keys = {v.key for v in variables if v.target_id == view_target.id}
+        variables = [v for v in variables
+                     if v.target_id == view_target.id
+                     or (v.target_id is None and v.key not in override_keys)]
     for v in variables:
         applies = (v.target_id is None) or (v.target and v.target.label == live_target)
         v.live = (live_status.get(v.key, "live")
@@ -123,6 +134,7 @@ def environment_detail(request, slug):
             "env": env,
             "variables": variables,
             "targets": targets,
+            "view_target": view_target,        # None = show all; else scope table to this target
             "archived": env.variables.filter(archived=True),
             "user": request.appuser,
             "managed_keys": settings.KEYMAKER_MANAGED_KEYS,

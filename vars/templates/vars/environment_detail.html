@@ -97,26 +97,41 @@
 </section>
 
 <section class="variables"
-         x-data="{ open: false, form: { id:'', key:'', value:'', is_secret:true, target:'', label:'' } }"
+         x-data="{ open: false, form: { id:'', key:'', value:'', is_secret:true, target:'', label:'' },
+                   q: '', collapsed: {}, allCollapsed: false,
+                   matchRow(k){ return this.q === '' || k.toLowerCase().includes(this.q.toLowerCase()) },
+                   groupHasMatch(ks){ return this.q === '' || ks.some(k => this.matchRow(k)) },
+                   rowCollapsed(g){ return g in this.collapsed ? this.collapsed[g] : this.allCollapsed } }"
          @edit-var.window="open=true; form={ id:$event.detail.id, key:$event.detail.key, value:'', is_secret:$event.detail.is_secret, target:$event.detail.target, label:$event.detail.label }">
   <div class="section-bar">
     <h3>Variables</h3>
-    <div style="display:flex; gap:10px; align-items:center">
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+      <input type="search" placeholder="🔍 filter keys…" x-model="q" class="small" style="width:160px"
+             title="Filter variables by key name">
       {% if targets %}
         <form method="get" style="display:inline">
-          <label class="muted small">liveness vs
-            <select name="live" onchange="this.form.submit()">
-              <option value="">—</option>
-              {% for t in targets %}<option value="{{ t.label }}" {% if t.label == live_target %}selected{% endif %}>{{ t.label }}</option>{% endfor %}
+          <label class="muted small">show
+            <select name="target" onchange="this.form.submit()" title="Scope the table to one target's resolved variables">
+              <option value="">all targets</option>
+              {% for t in targets %}<option value="{{ t.id }}" {% if view_target and t.id == view_target.id %}selected{% endif %}>{{ t.label }}</option>{% endfor %}
             </select>
           </label>
         </form>
       {% endif %}
+      <span class="muted small">
+        <a href="#" @click.prevent="allCollapsed=false; collapsed={}">expand all</a> ·
+        <a href="#" @click.prevent="allCollapsed=true; collapsed={}">collapse all</a>
+      </span>
       {% if user.is_admin %}
-        <button class="btn primary small" @click="open=true; form={id:'',key:'',value:'',is_secret:true,target:'',label:''}">+ Add variable</button>
+        <button class="btn primary small" @click="open=true; form={id:'',key:'',value:'',is_secret:true,target:'{{ view_target.id|default_if_none:'' }}',label:''}">+ Add variable</button>
       {% endif %}
     </div>
   </div>
+  {% if view_target %}
+    <p class="muted small"><span class="badge target">{{ view_target.label }}</span>
+      showing this target's resolved set — base (all-targets) vars plus its overrides.
+      <a href="{% url 'environment_detail' env.slug %}">show all targets</a></p>
+  {% endif %}
   {% if live_target %}
     {% if live_status is None %}
       <p class="muted small"><span class="badge unused">no check yet</span> for <code>{{ live_target }}</code> — runs once the drift cron is wired.</p>
