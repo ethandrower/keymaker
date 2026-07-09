@@ -514,7 +514,9 @@ def checks_run(request):
             try:
                 drift.check_one(env, t, ssh_base, actor=actor)
                 checked += 1
-            except (RuntimeError, subprocess.TimeoutExpired) as exc:
+            except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+                # OSError covers a missing ssh binary (FileNotFoundError); any check
+                # failure must surface as a message, never a 500 for the whole page.
                 errors.append(f"{t.label}: {str(exc)[:200]}")
     finally:
         if tmp:

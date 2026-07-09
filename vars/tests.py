@@ -539,6 +539,16 @@ class DriftCheckCommandTests(TestCase):
                          stderr=io.StringIO())  # must not raise
         self.assertFalse(DriftCheck.objects.filter(environment=self.env).exists())
 
+    def test_missing_ssh_binary_does_not_crash_batch(self):
+        # FileNotFoundError (no ssh client) must be caught like an SSH error so the
+        # command records nothing for that target and doesn't crash.
+        import io
+        from django.core.management import call_command
+        with mock.patch(f"{self.MOD}.dokku_config",
+                        side_effect=FileNotFoundError(2, "No such file or directory", "ssh")):
+            call_command("drift_check", stdout=io.StringIO(), stderr=io.StringIO())  # must not raise
+        self.assertFalse(DriftCheck.objects.filter(environment=self.env).exists())
+
     def test_target_without_host_is_skipped(self):
         Target.objects.create(environment=self.env, label="local", local_only=True)
         self._run({"SECRET_KEY": "km", "API_TOKEN": "km-tok"})
@@ -690,6 +700,16 @@ class OnDemandCheckTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(DriftCheck.objects.exists())
         self.assertContains(resp, "Permission denied")  # visible, not a silent 'never'
+
+    def test_missing_ssh_binary_is_a_message_not_a_500(self):
+        # If the ssh client isn't installed, subprocess raises FileNotFoundError
+        # (an OSError). It must surface as a flash message, never a 500.
+        self._login()
+        with mock.patch(f"{self.MOD}.dokku_config",
+                        side_effect=FileNotFoundError(2, "No such file or directory", "ssh")):
+            resp = self.client.post("/checks/run", {"env": "staging", "target": "boxA"}, follow=True)
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(DriftCheck.objects.exists())
 
     def test_target_without_host_is_not_checkable(self):
         self._login()

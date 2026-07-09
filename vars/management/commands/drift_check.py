@@ -48,7 +48,9 @@ class Command(BaseCommand):
                         continue  # nowhere to check
                     try:
                         dc, mgd_added, mgd_gone = drift.check_one(env, target, ssh_base)
-                    except (RuntimeError, subprocess.TimeoutExpired) as exc:
+                    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+                        # OSError covers a missing ssh binary (FileNotFoundError); one bad
+                        # target must not crash the whole batch.
                         self.stderr.write(f"  {env.slug}/{target.label}: SSH error — {exc}")
                         continue
                     checked += 1

@@ -6,9 +6,13 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# System deps (psycopg needs libpq at runtime via the binary wheel; build tools kept minimal)
+# System deps: libpq5 for psycopg's binary wheel; openssh-client so the drift
+# check (management command + on-demand UI button) can SSH into the Dokku hosts
+# to read their live config. Without ssh, `drift_check` fails with FileNotFoundError
+# and every target shows "never".
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libpq5 \
+        openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
