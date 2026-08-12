@@ -9,7 +9,7 @@ from django.utils import timezone
 from django.utils.text import slugify
 from django.views.decorators.http import require_POST
 
-from . import auth, exporters
+from . import auth, exporters, sync
 from .models import AuditLog, Environment, Target, Variable
 
 
@@ -89,17 +89,9 @@ def _env_target(env, ident):
         env.targets.filter(label=ident).first()
 
 
-def _liveness(env, target_label):
-    """Per-key live/drifted/pending status for a target, from its latest drift check.
-    Returns (status_dict, on_box_new_list, checked_at) or (None, [], None) if never checked."""
-    from .models import DriftCheck
-    dc = DriftCheck.objects.filter(environment=env, target_label=target_label).first()
-    if not dc:
-        return None, [], None
-    status = {k: "drifted" for k in dc.value_mismatch}
-    for k in dc.in_keymaker_only:
-        status.setdefault(k, "pending")
-    return status, dc.on_box_only, dc.checked_at
+def _sort_key(v):
+    """Server-only rows first (they need adopting), then the normal label/key order."""
+    return (0 if getattr(v, "is_server_only", False) else 1, v.label or "", v.key)
 
 
 @login_required
@@ -108,11 +100,6 @@ def environment_detail(request, slug):
     targets = env.targets.all()
     # Optional: scope the variable table to one target's resolved view (?target=<id>).
     view_target = _env_target(env, request.GET.get("target"))
-    # Liveness: an explicit ?target= scopes it to that box; else honor ?live=;
-    # else default to the only target for single-target envs.
-    live_target = (view_target.label if view_target else
-                   request.GET.get("live") or (targets[0].label if len(targets) == 1 else ""))
-    live_status, on_box_new, live_checked_at = _liveness(env, live_target) if live_target else (None, [], None)
     # active_vars() is ordered by (label, key) so the template can {% regroup %}.
     variables = list(env.active_vars())
     if view_target:
@@ -122,10 +109,15 @@ def environment_detail(request, slug):
         variables = [v for v in variables
                      if v.target_id == view_target.id
                      or (v.target_id is None and v.key not in override_keys)]
-    for v in variables:
-        applies = (v.target_id is None) or (v.target and v.target.label == live_target)
-        v.live = (live_status.get(v.key, "live")
-                  if (live_status is not None and applies and not v.is_managed) else None)
+
+    # Sync status: what each key actually looks like on the boxes it belongs on.
+    # With no target selected this rolls up across every checkable target; with
+    # one selected it narrows to that box's exact state.
+    checks = sync.latest_checks(env, targets)
+    sync.annotate(variables, targets, checks, view_target=view_target)
+    extra = sync.server_only_rows(targets, checks, {v.key for v in variables}, view_target=view_target)
+    summary = sync.summarize(variables, extra, checks, targets)
+    variables = sorted(variables + extra, key=_sort_key)
     return render(
         request,
         "vars/environment_detail.html",
@@ -138,10 +130,8 @@ def environment_detail(request, slug):
             "archived": env.variables.filter(archived=True),
             "user": request.appuser,
             "managed_keys": settings.KEYMAKER_MANAGED_KEYS,
-            "live_target": live_target,
-            "live_status": live_status,        # None = never checked; else {key: drifted|pending}
-            "on_box_new": on_box_new,          # keys on the box not in Keymaker
-            "live_checked_at": live_checked_at,
+            "summary": summary,                # env-level sync headline
+            "stale_after_hours": int(sync.STALE_AFTER.total_seconds() // 3600),
         },
     )
 

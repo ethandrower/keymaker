@@ -1,13 +1,15 @@
 """Tests for keymaker core behavior."""
 import json
+from datetime import timedelta
 from unittest import mock
 
 from django.test import TestCase, override_settings
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from cryptography.fernet import Fernet
 
-from . import auth, crypto
+from . import auth, crypto, sync
 from .models import DriftCheck, Environment, Target, Variable
 
 TEST_KEY = Fernet.generate_key().decode()
@@ -1083,3 +1085,145 @@ class ScanReconcileTests(TestCase):
         self.assertEqual(counts["DEP_KEY"], 1)      # references still counted
         self.assertEqual(referenced, set())          # but referenced/dynamic not mined
         self.assertFalse(dynamic)
+
+
+@override_settings(
+    KEYMAKER_MASTER_KEYS=[TEST_KEY], KEYMAKER_MANAGED_KEYS=["DATABASE_URL"],
+    KEYMAKER_KEY=API_KEY,
+    STATICFILES_STORAGE="django.contrib.staticfiles.storage.StaticFilesStorage",
+)
+class SyncStatusTests(TestCase):
+    """Per-variable sync status against the boxes, derived from the latest DriftCheck.
+
+    The states must stay honest in both directions: a key we never checked reads
+    `unknown`, never `synced`; a key set on the box but absent from Keymaker gets a
+    real row rather than a footnote."""
+
+    def setUp(self):
+        crypto._fernet = None
+        self.env = Environment.objects.create(slug="lab", name="Lab")
+        self.tA = Target.objects.create(environment=self.env, label="boxA", dokku_app="lab-a")
+        self.tB = Target.objects.create(environment=self.env, label="boxB", dokku_app="lab-b")
+        for key in ("MATCHES", "DIFFERS", "NOT_ON_BOX"):
+            v = Variable(environment=self.env, key=key)
+            v.set_value("x"); v.save()
+
+    def _check(self, target_label, *, mismatch=(), km_only=(), on_box=(), age_hours=1):
+        return DriftCheck.objects.create(
+            environment=self.env, target_label=target_label,
+            checked_at=timezone.now() - timedelta(hours=age_hours),
+            value_mismatch=list(mismatch), in_keymaker_only=list(km_only),
+            on_box_only=list(on_box), in_sync=not (mismatch or km_only or on_box),
+        )
+
+    def _login(self):
+        self.client.post("/login", {"key": API_KEY})
+
+    def _rows(self, resp):
+        return {v.key: v for v in resp.context["variables"]}
+
+    def test_fresh_check_classifies_each_bucket(self):
+        for label in ("boxA", "boxB"):
+            self._check(label, mismatch=["DIFFERS"], km_only=["NOT_ON_BOX"])
+        self._login()
+        rows = self._rows(self.client.get(f"/environments/{self.env.slug}/"))
+        self.assertEqual({s for _, s in rows["MATCHES"].sync}, {sync.SYNCED})
+        self.assertEqual({s for _, s in rows["DIFFERS"].sync}, {sync.DRIFTED})
+        self.assertEqual({s for _, s in rows["NOT_ON_BOX"].sync}, {sync.KEYMAKER_ONLY})
+
+    def test_never_checked_is_unknown_not_synced(self):
+        """The regression that motivated this: no check must never render as green."""
+        self._login()
+        rows = self._rows(self.client.get(f"/environments/{self.env.slug}/"))
+        self.assertEqual({s for _, s in rows["MATCHES"].sync}, {sync.UNKNOWN})
+        self.assertEqual(rows["MATCHES"].synced_n, 0)
+
+    def test_stale_check_degrades_to_unknown(self):
+        self._check("boxA", age_hours=100)
+        self._check("boxB", age_hours=100)
+        self._login()
+        rows = self._rows(self.client.get(f"/environments/{self.env.slug}/"))
+        self.assertEqual({s for _, s in rows["MATCHES"].sync}, {sync.UNKNOWN})
+
+    def test_rollup_counts_per_box(self):
+        self._check("boxA")                            # everything matches
+        self._check("boxB", mismatch=["DIFFERS"])      # one differs here only
+        self._login()
+        rows = self._rows(self.client.get(f"/environments/{self.env.slug}/"))
+        self.assertEqual((rows["MATCHES"].synced_n, rows["MATCHES"].total_n), (2, 2))
+        self.assertEqual((rows["DIFFERS"].synced_n, rows["DIFFERS"].total_n), (1, 2))
+        self.assertEqual(sorted(s for _, s in rows["DIFFERS"].sync), [sync.DRIFTED, sync.SYNCED])
+
+    def test_server_only_key_becomes_a_row(self):
+        self._check("boxA", on_box=["STRAY_KEY"])
+        self._check("boxB")
+        self._login()
+        resp = self.client.get(f"/environments/{self.env.slug}/")
+        rows = self._rows(resp)
+        self.assertIn("STRAY_KEY", rows)
+        stray = rows["STRAY_KEY"]
+        self.assertTrue(stray.is_server_only)
+        self.assertIsNone(stray.id)                       # no Variable backs it
+        self.assertEqual(stray.adopt_target_id, self.tA.id)
+        self.assertEqual(resp.context["summary"]["server_only"], 1)
+
+    def test_server_only_ignored_when_stale(self):
+        """A stale check's on-box list is no more trustworthy than its dots."""
+        self._check("boxA", on_box=["STRAY_KEY"], age_hours=100)
+        self._login()
+        self.assertNotIn("STRAY_KEY", self._rows(self.client.get(f"/environments/{self.env.slug}/")))
+
+    def test_adopted_key_stops_being_server_only(self):
+        self._check("boxA", on_box=["STRAY_KEY"])
+        v = Variable(environment=self.env, key="STRAY_KEY", target=self.tA)
+        v.set_value("adopted"); v.save()
+        self._login()
+        rows = self._rows(self.client.get(f"/environments/{self.env.slug}/"))
+        self.assertFalse(getattr(rows["STRAY_KEY"], "is_server_only", False))
+
+    def test_target_filter_narrows_to_that_box(self):
+        self._check("boxA", mismatch=["DIFFERS"])
+        self._check("boxB")
+        self._login()
+        rows = self._rows(self.client.get(f"/environments/{self.env.slug}/?target={self.tA.id}"))
+        self.assertEqual(rows["DIFFERS"].status, sync.DRIFTED)   # single box -> single status
+        self.assertEqual(rows["MATCHES"].status, sync.SYNCED)
+        self.assertEqual(rows["DIFFERS"].total_n, 1)
+
+    def test_override_only_checked_against_its_own_target(self):
+        override = Variable(environment=self.env, key="ONLY_A", target=self.tA)
+        override.set_value("a"); override.save()
+        self._check("boxA")
+        self._check("boxB", km_only=["ONLY_A"])   # boxB legitimately lacks it
+        self._login()
+        rows = self._rows(self.client.get(f"/environments/{self.env.slug}/"))
+        self.assertEqual([lbl for lbl, _ in rows["ONLY_A"].sync], ["boxA"])
+        self.assertEqual(rows["ONLY_A"].status, sync.SYNCED)
+
+    def test_managed_keys_are_outside_sync(self):
+        m = Variable(environment=self.env, key="DATABASE_URL", is_managed=True)
+        m.set_value("postgres://x"); m.save()
+        self._check("boxA"); self._check("boxB")
+        self._login()
+        rows = self._rows(self.client.get(f"/environments/{self.env.slug}/"))
+        self.assertEqual(rows["DATABASE_URL"].sync, [])
+
+    def test_local_only_target_excluded_from_denominator(self):
+        Target.objects.create(environment=self.env, label="localhost", local_only=True)
+        self._check("boxA"); self._check("boxB")
+        self._login()
+        rows = self._rows(self.client.get(f"/environments/{self.env.slug}/"))
+        self.assertEqual(rows["MATCHES"].total_n, 2)   # localhost never polled, so never counted
+
+    def test_summary_reports_unchecked_targets(self):
+        self._check("boxA")
+        self._login()
+        summary = self.client.get(f"/environments/{self.env.slug}/").context["summary"]
+        self.assertEqual((summary["targets_checked"], summary["targets_total"]), (1, 2))
+        self.assertEqual(summary["targets_unchecked"], ["boxB"])
+        self.assertFalse(summary["clean"])
+
+    def test_summary_clean_only_when_everything_matches(self):
+        self._check("boxA"); self._check("boxB")
+        self._login()
+        self.assertTrue(self.client.get(f"/environments/{self.env.slug}/").context["summary"]["clean"])

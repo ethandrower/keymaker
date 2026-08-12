@@ -98,9 +98,17 @@
 
 <section class="variables"
          x-data="{ open: false, form: { id:'', key:'', value:'', is_secret:true, target:'', label:'' },
-                   q: '', collapsed: {}, allCollapsed: false,
-                   matchRow(k){ return this.q === '' || k.toLowerCase().includes(this.q.toLowerCase()) },
-                   groupHasMatch(ks){ return this.q === '' || ks.some(k => this.matchRow(k)) },
+                   q: '', stf: '', collapsed: {}, allCollapsed: false,
+                   matchStatus(tokens){
+                     if (this.stf === '') return true;
+                     const t = (tokens || '').split(' ');
+                     if (this.stf === 'attention') return ['drifted','server_only','keymaker_only','unknown'].some(s => t.includes(s));
+                     return t.includes(this.stf);
+                   },
+                   matchRow(k, tokens){
+                     return (this.q === '' || k.toLowerCase().includes(this.q.toLowerCase())) && this.matchStatus(tokens);
+                   },
+                   groupHasMatch(rows){ return rows.some(r => this.matchRow(r.k, r.s)) },
                    rowCollapsed(g){ return g in this.collapsed ? this.collapsed[g] : this.allCollapsed } }"
          @edit-var.window="open=true; form={ id:$event.detail.id, key:$event.detail.key, value:'', is_secret:$event.detail.is_secret, target:$event.detail.target, label:$event.detail.label }">
   <div class="section-bar">
@@ -108,6 +116,15 @@
     <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
       <input type="search" placeholder="🔍 filter keys…" x-model="q" class="small" style="width:160px"
              title="Filter variables by key name">
+      <select x-model="stf" class="small" title="Filter by sync status against the boxes">
+        <option value="">any status</option>
+        <option value="attention">⚠ needs attention</option>
+        <option value="synced">● in sync</option>
+        <option value="drifted">◐ value differs</option>
+        <option value="keymaker_only">○ not on box</option>
+        <option value="server_only">◆ server only</option>
+        <option value="unknown">? not checked</option>
+      </select>
       {% if targets %}
         <form method="get" style="display:inline">
           <label class="muted small">show
@@ -132,19 +149,36 @@
       showing this target's resolved set — base (all-targets) vars plus its overrides.
       <a href="{% url 'environment_detail' env.slug %}">show all targets</a></p>
   {% endif %}
-  {% if live_target %}
-    {% if live_status is None %}
-      <p class="muted small"><span class="badge unused">no check yet</span> for <code>{{ live_target }}</code> — runs once the drift cron is wired.</p>
+  {# Sync headline: what we can actually vouch for, and what we can't. #}
+  <div class="sync-summary {% if summary.clean %}clean{% elif summary.targets_checked == 0 %}unknown{% else %}attention{% endif %}">
+    {% if summary.targets_total == 0 %}
+      <span class="muted small">No remote targets — nothing to compare against.</span>
+    {% elif summary.targets_checked == 0 %}
+      <strong>?</strong> Never checked — status below is unknown, not healthy.
+      <span class="muted small">No drift check has run for
+        {% if summary.targets_unchecked %}<code>{{ summary.targets_unchecked|join:"</code>, <code>" }}</code>{% endif %}.
+        <a href="{% url 'checks' %}">Run one →</a></span>
     {% else %}
-      <p class="muted small">
-        Liveness vs <code>{{ live_target }}</code> (checked {{ live_checked_at|date:"Y-m-d H:i" }}):
-        <span class="live-dot live">●</span> live ·
-        <span class="live-dot drifted">●</span> drifted ·
-        <span class="live-dot pending">○</span> not on box
-        {% if on_box_new %}<br><strong>On box but not in Keymaker:</strong> {{ on_box_new|join:", " }} <em>(adopt via Sync)</em>{% endif %}
-      </p>
+      {% if summary.clean %}<strong>●</strong> All {{ summary.synced }} values match the box{{ summary.targets_checked|pluralize }}.
+      {% else %}<strong>⚠</strong> Needs attention:
+        {% if summary.drifted %}<span class="chip drifted">{{ summary.drifted }} value{{ summary.drifted|pluralize }} differ{{ summary.drifted|pluralize:"s," }}</span>{% endif %}
+        {% if summary.keymaker_only %}<span class="chip keymaker_only">{{ summary.keymaker_only }} not on box</span>{% endif %}
+        {% if summary.server_only %}<span class="chip server_only">{{ summary.server_only }} unadopted on box</span>{% endif %}
+        {% if summary.unknown %}<span class="chip unknown">{{ summary.unknown }} unchecked</span>{% endif %}
+      {% endif %}
+      <span class="muted small">· {{ summary.targets_checked }}/{{ summary.targets_total }} target{{ summary.targets_total|pluralize }} checked,
+        last {{ summary.last_checked_at|timesince }} ago
+        {% if summary.targets_unchecked %}· stale or never checked: <code>{{ summary.targets_unchecked|join:"</code>, <code>" }}</code>{% endif %}
+        · <a href="{% url 'checks' %}">check now →</a></span>
     {% endif %}
-  {% endif %}
+  </div>
+  <p class="muted small sync-legend">
+    <span class="sync-dot synced">●</span> in sync ·
+    <span class="sync-dot drifted">◐</span> value differs ·
+    <span class="sync-dot keymaker_only">○</span> in Keymaker, not on box ·
+    <span class="sync-dot server_only">◆</span> on box, not in Keymaker ·
+    <span class="sync-dot unknown">?</span> not checked in {{ stale_after_hours }}h
+  </p>
 
   {% if user.is_admin %}
     <div class="var-editor" x-show="open" x-cloak>
@@ -172,7 +206,7 @@
   <table class="vars-table">
     <thead>
       <tr>
-        <th>Key</th><th>Value</th><th>Scope</th>{% if user.is_admin %}<th>Actions</th>{% endif %}
+        <th>Key</th><th>Value</th><th>Status</th><th>Scope</th>{% if user.is_admin %}<th>Actions</th>{% endif %}
       </tr>
     </thead>
     {% include "vars/_variable_rows.html" %}

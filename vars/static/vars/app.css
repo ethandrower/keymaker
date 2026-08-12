@@ -82,10 +82,36 @@ th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: upp
 .badge.target { color: var(--accent); border-color: var(--accent); }
 .vars-table tr.label-head td { background: var(--panel); color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; padding-top: 14px; }
 .vars-table td.scope { white-space: nowrap; }
-.live-dot { font-size: 11px; margin-right: 4px; }
-.live-dot.live { color: var(--ok); }
-.live-dot.drifted { color: var(--warn); }
-.live-dot.pending { color: var(--muted); }
+/* Sync status: how a key compares to what's actually set on each box. */
+.vars-table td.status { white-space: nowrap; font-size: 12px; }
+.sync-dot { font-size: 11px; margin-right: 3px; }
+.sync-dot.synced { color: var(--ok); }
+.sync-dot.drifted { color: var(--warn); }
+.sync-dot.keymaker_only { color: var(--accent); }
+.sync-dot.server_only { color: var(--secret); }
+.sync-dot.unknown { color: var(--muted); }
+.dot-row { letter-spacing: 1px; margin-right: 6px; }
+.muted.attention { color: var(--warn); }
+.server-only-row { background: rgba(176, 124, 255, .06); }
+.badge.server-only { background: rgba(176, 124, 255, .15); color: var(--secret); }
+
+.sync-summary {
+  border: 1px solid var(--border); border-left-width: 3px; border-radius: 8px;
+  background: var(--panel); padding: 9px 12px; margin: 10px 0 6px; font-size: 13px;
+}
+.sync-summary.clean { border-left-color: var(--ok); }
+.sync-summary.attention { border-left-color: var(--warn); }
+.sync-summary.unknown { border-left-color: var(--muted); }
+.sync-summary .chip {
+  display: inline-block; border-radius: 999px; padding: 1px 9px; margin-right: 6px;
+  font-size: 12px; background: var(--panel2); border: 1px solid var(--border);
+}
+.sync-summary .chip.drifted { color: var(--warn); border-color: var(--warn); }
+.sync-summary .chip.keymaker_only { color: var(--accent); border-color: var(--accent); }
+.sync-summary .chip.server_only { color: var(--secret); border-color: var(--secret); }
+.sync-summary .chip.unknown { color: var(--muted); }
+.sync-legend { margin: 0 0 10px; }
+.sync-legend .sync-dot { margin-left: 6px; }
 
 /* Var editor */
 .var-editor { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-bottom: 12px; }

@@ -1,22 +1,27 @@
-{% comment %}<tbody> of the variables table: grouped by label, with a Scope column.
-Swapped in by HTMX after edits. `variables` is ordered by (label, key).{% endcomment %}
-{% load static %}
+{% comment %}<tbody> of the variables table: grouped by label, with Status + Scope columns.
+Swapped in by HTMX after edits. `variables` is ordered server-side by
+(is_server_only, label, key) so each label forms one contiguous {% regroup %} group.
+
+Rows are either real Variables or sync.ServerOnlyRow pseudo-rows (keys found on a box
+but absent from Keymaker) — the latter have no id, so every id-based URL is guarded.{% endcomment %}
+{% load sync_tags %}
 <tbody id="var-rows">
   {% regroup variables by label as grouped %}
   {% for grp in grouped %}
     {% with gid=grp.grouper|default:"Unlabeled" %}
     {% if grouped|length > 1 or grp.grouper %}
-      <tr class="label-head" x-show="groupHasMatch([{% for v in grp.list %}'{{ v.key|escapejs }}'{% if not forloop.last %},{% endif %}{% endfor %}])"
+      <tr class="label-head" x-show="groupHasMatch([{% for v in grp.list %}{k:'{{ v.key|escapejs }}',s:'{{ v.status_tokens }}'}{% if not forloop.last %},{% endif %}{% endfor %}])"
           @click="collapsed['{{ gid|escapejs }}'] = !rowCollapsed('{{ gid|escapejs }}')" style="cursor:pointer">
-        <td colspan="{% if user.is_admin %}4{% else %}3{% endif %}">
+        <td colspan="{% if user.is_admin %}5{% else %}4{% endif %}">
           <span x-text="rowCollapsed('{{ gid|escapejs }}') ? '▸' : '▾'" class="muted"></span>
           {{ gid }} <span class="muted small">({{ grp.list|length }})</span>
         </td>
       </tr>
     {% endif %}
     {% for v in grp.list %}
-      <tr x-data="{ revealed: false, value: '' }"
-          x-show="matchRow('{{ v.key|escapejs }}') && (q !== '' || !rowCollapsed('{{ gid|escapejs }}'))">
+      <tr {% if not v.is_server_only %}x-data="{ revealed: false, value: '' }"{% endif %}
+          {% if v.is_server_only %}class="server-only-row"{% endif %}
+          x-show="matchRow('{{ v.key|escapejs }}', '{{ v.status_tokens }}') && (q !== '' || stf !== '' || !rowCollapsed('{{ gid|escapejs }}'))">
         <td class="key">
           {{ v.key }}
           {% if v.is_managed %}<span class="badge managed">managed</span>{% endif %}
@@ -24,7 +29,9 @@ Swapped in by HTMX after edits. `variables` is ordered by (label, key).{% endcom
           {% if v.suspected_unused %}<span class="badge unused" title="{{ v.audit_note }} — last seen {{ v.last_seen_at|default:'never' }}">⚠ unused?</span>{% endif %}
         </td>
         <td class="value">
-          {% if v.is_secret %}
+          {% if v.is_server_only %}
+            <span class="muted small" title="Drift checks record key names only, never values — Keymaker has no copy of this one.">value only on the box</span>
+          {% elif v.is_secret %}
             <span x-show="!revealed" class="masked">••••••••</span>
             <code x-show="revealed" x-text="value" class="revealed-value"></code>
             <button class="icon-btn"
@@ -40,16 +47,36 @@ Swapped in by HTMX after edits. `variables` is ordered by (label, key).{% endcom
                     title="Copy">📋</button>
           {% endif %}
         </td>
+        <td class="status">
+          {% if v.is_managed %}
+            <span class="muted small" title="Dokku owns this key — Keymaker never sets or compares it">— managed</span>
+          {% elif not v.sync %}
+            <span class="muted small" title="No box in this environment receives this variable">—</span>
+          {% elif v.sync|length == 1 %}
+            {% for label, s in v.sync %}
+              <span class="sync-dot {{ s }}" title="{{ label }}: {{ s|sync_label }}">{{ s|sync_glyph }}</span>
+              <span class="muted small">{{ s|sync_label }}</span>
+            {% endfor %}
+          {% else %}
+            <span class="dot-row">
+              {% for label, s in v.sync %}<span class="sync-dot {{ s }}" title="{{ label }}: {{ s|sync_label }}">{{ s|sync_glyph }}</span>{% endfor %}
+            </span>
+            <span class="muted small{% if v.synced_n < v.total_n %} attention{% endif %}">{{ v.synced_n }}/{{ v.total_n }}</span>
+          {% endif %}
+        </td>
         <td class="scope">
-          {% if v.live == "live" %}<span class="live-dot live" title="Live on the target — matches the box">●</span>
-          {% elif v.live == "drifted" %}<span class="live-dot drifted" title="Drifted — box value differs">●</span>
-          {% elif v.live == "pending" %}<span class="live-dot pending" title="Not yet applied on the box">○</span>{% endif %}
-          {% if v.target_id %}<span class="badge target">{{ v.target.label }}</span>
+          {% if v.is_server_only %}
+            <span class="badge server-only">unadopted</span>
+          {% elif v.target_id %}<span class="badge target">{{ v.target.label }}</span>
           {% else %}<span class="muted small">all targets</span>{% endif %}
         </td>
         {% if user.is_admin %}
           <td class="actions">
-            {% if not v.is_managed %}
+            {% if v.is_server_only %}
+              <button class="btn small primary"
+                      title="Add this key to Keymaker — paste the value from the box"
+                      @click="$dispatch('edit-var', {id: '', key: '{{ v.key|escapejs }}', is_secret: true, target: '{{ v.adopt_target_id }}', label: '' })">Adopt</button>
+            {% elif not v.is_managed %}
               <button class="btn small"
                       @click="$dispatch('edit-var', {id: {{ v.id }}, key: '{{ v.key|escapejs }}', is_secret: {{ v.is_secret|yesno:'true,false' }}, target: '{{ v.target_id|default_if_none:'' }}', label: '{{ v.label|escapejs }}' })">Edit</button>
               <form method="post" action="{% url 'variable_archive' env.slug v.id %}" style="display:inline"
@@ -67,6 +94,6 @@ Swapped in by HTMX after edits. `variables` is ordered by (label, key).{% endcom
     {% endfor %}
     {% endwith %}
   {% empty %}
-    <tr><td colspan="{% if user.is_admin %}4{% else %}3{% endif %}" class="muted">No variables yet.</td></tr>
+    <tr><td colspan="{% if user.is_admin %}5{% else %}4{% endif %}" class="muted">No variables yet.</td></tr>
   {% endfor %}
 </tbody>
