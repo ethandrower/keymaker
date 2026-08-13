@@ -157,7 +157,7 @@
       <strong>?</strong> Never checked — status below is unknown, not healthy.
       <span class="muted small">No drift check has run for
         {% if summary.targets_unchecked %}<code>{{ summary.targets_unchecked|join:"</code>, <code>" }}</code>{% endif %}.
-        <a href="{% url 'checks' %}">Run one →</a></span>
+        {% include "vars/_check_now.html" %}</span>
     {% else %}
       {% if summary.clean %}<strong>●</strong> All {{ summary.synced }} values match the box{{ summary.targets_checked|pluralize }}.
       {% else %}<strong>⚠</strong> Needs attention:
@@ -169,7 +169,7 @@
       <span class="muted small">· {{ summary.targets_checked }}/{{ summary.targets_total }} target{{ summary.targets_total|pluralize }} checked,
         last {{ summary.last_checked_at|timesince }} ago
         {% if summary.targets_unchecked %}· stale or never checked: <code>{{ summary.targets_unchecked|join:"</code>, <code>" }}</code>{% endif %}
-        · <a href="{% url 'checks' %}">check now →</a></span>
+        · {% include "vars/_check_now.html" %}</span>
     {% endif %}
   </div>
   <p class="muted small sync-legend">
@@ -180,11 +180,15 @@
     <span class="sync-dot unknown">?</span> not checked in {{ stale_after_hours }}h
   </p>
 
+  {# Keys the boxes have and we don't — triaged above the table, not buried in it. #}
+  {% include "vars/_adoption_panel.html" %}
+
   {% if user.is_admin %}
     <div class="var-editor" x-show="open" x-cloak>
       <form hx-post="{% url 'variable_save' env.slug %}" hx-target="#var-rows" hx-swap="outerHTML"
             @htmx:after-request="if($event.detail.successful){ open=false }">
         <input type="hidden" name="id" :value="form.id">
+        <input type="hidden" name="view_target" value="{{ view_target.id|default_if_none:'' }}">
         <input name="key" placeholder="KEY" x-model="form.key" :readonly="!!form.id" required>
         <input name="value" placeholder="value" x-model="form.value"
                :placeholder="form.id ? 'new value (leave blank to keep)' : 'value'">

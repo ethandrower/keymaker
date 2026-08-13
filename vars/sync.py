@@ -11,7 +11,12 @@ Five states, every one of them *derived from a real check* — never assumed:
 
 The `unknown` state matters as much as the others: a green dot drawn from a
 three-week-old check is a lie, and "we never looked" must never render the same
-as "we looked and it matched".
+as "we looked and it matched". For the same reason every status carries the
+timestamp it came from, so the UI can always answer "says who, and when?".
+
+Keys found on a box but absent from Keymaker are not variable rows — they are
+triage, not configuration. They surface in their own adoption panel above the
+table (`adoption_rows`), where the only two answers are adopt or ignore.
 """
 
 from datetime import timedelta
@@ -42,6 +47,38 @@ GLYPHS = {SYNCED: "●", DRIFTED: "◐", KEYMAKER_ONLY: "○", SERVER_ONLY: "◆
 # Worst-first, so a row's headline status is its most alarming one.
 SEVERITY = {DRIFTED: 0, SERVER_ONLY: 1, KEYMAKER_ONLY: 2, UNKNOWN: 3, SYNCED: 4}
 MANAGED_SEVERITY = 9  # Dokku owns these; they are outside the sync contract.
+
+# States a "send to app server" push would fix: Keymaker holds a value the box
+# is missing or disagrees with.
+PUSHABLE = (DRIFTED, KEYMAKER_ONLY)
+
+
+class BoxStatus:
+    """One variable's state on one box, and the check that established it."""
+
+    def __init__(self, target, status, checked_at):
+        self.label = target.label
+        self.target_id = target.id
+        self.status = status
+        self.checked_at = checked_at  # None when never checked or stale
+
+    @property
+    def glyph(self):
+        return GLYPHS[self.status]
+
+    @property
+    def text(self):
+        return LABELS[self.status]
+
+    @property
+    def pushable(self):
+        return self.status in PUSHABLE
+
+    @property
+    def tooltip(self):
+        when = (f"checked {self.checked_at:%Y-%m-%d %H:%M} UTC" if self.checked_at
+                else f"no check in the last {int(STALE_AFTER.total_seconds() // 3600)}h")
+        return f"{self.label}: {self.text} ({when})"
 
 
 def checkable_targets(targets):
@@ -87,98 +124,107 @@ def _applicable(var, targets, view_target):
 def annotate(variables, targets, checks, view_target=None):
     """Attach sync status to each Variable, in place.
 
-    Sets `.sync` ([(target_label, status)]), `.status` (single status when the
-    row resolves to exactly one box, else None), `.synced_n`/`.total_n` for the
-    rollup, `.severity` for sorting/filtering and `.status_tokens` for the
-    client-side status filter.
+    Sets `.sync` (list of BoxStatus), `.status` (single status when the row
+    resolves to exactly one box, else None), `.synced_n`/`.total_n` for the
+    rollup, `.pushable` (the boxes a push would fix), `.severity` for sorting
+    and `.status_tokens` for the client-side status filter.
     """
     reachable = checkable_targets(targets)
     for v in variables:
         if v.is_managed:
-            v.sync, v.status = [], None
+            v.sync, v.status, v.pushable = [], None, []
             v.status_label = "managed by Dokku — outside sync"
             v.synced_n = v.total_n = 0
             v.severity, v.status_tokens = MANAGED_SEVERITY, "managed"
             continue
 
-        pairs = []
+        boxes = []
         for t in _applicable(v, reachable, view_target):
             dc, fresh = checks.get(t.label, (None, False))
-            pairs.append((t.label, key_status(dc, v.key) if fresh else UNKNOWN))
+            status = key_status(dc, v.key) if fresh else UNKNOWN
+            boxes.append(BoxStatus(t, status, dc.checked_at if fresh else None))
 
-        v.sync = pairs
-        v.total_n = len(pairs)
-        v.synced_n = sum(1 for _, s in pairs if s == SYNCED)
-        v.severity = min((SEVERITY[s] for _, s in pairs), default=MANAGED_SEVERITY)
-        v.status = pairs[0][1] if len(pairs) == 1 else None
+        v.sync = boxes
+        v.total_n = len(boxes)
+        v.synced_n = sum(1 for b in boxes if b.status == SYNCED)
+        v.pushable = [b for b in boxes if b.pushable]
+        v.severity = min((SEVERITY[b.status] for b in boxes), default=MANAGED_SEVERITY)
+        v.status = boxes[0].status if len(boxes) == 1 else None
         v.status_label = (
             LABELS[v.status] if v.status
-            else f"{v.synced_n}/{v.total_n} boxes in sync" if pairs
+            else f"{v.synced_n}/{v.total_n} boxes in sync" if boxes
             else "no box to check"
         )
-        v.status_tokens = " ".join(sorted({s for _, s in pairs}))
+        v.status_tokens = " ".join(sorted({b.status for b in boxes}))
     return variables
 
 
-class ServerOnlyRow:
-    """A key that exists on a box but not in Keymaker.
-
-    Rendered as a real row in the variables table rather than a footnote, so an
-    unadopted key is as visible — and as actionable — as a managed one. Drift
-    checks carry key *names* only, so there is no value to show; adopting one
-    opens the add-variable form with the key and target pre-filled.
-    """
-
-    is_server_only = True
-    is_managed = False
-    is_secret = False
-    suspected_unused = False
-    archived = False
-    id = None
-    target_id = None
-    value = ""
-    label = "⚠ On the box, not in Keymaker"
-    status = SERVER_ONLY
-    status_tokens = SERVER_ONLY
-    severity = SEVERITY[SERVER_ONLY]
-
-    def __init__(self, key, boxes):
-        self.key = key
-        self.boxes = boxes  # [(target_label, target_id)]
-        self.sync = [(label, SERVER_ONLY) for label, _ in boxes]
-        self.total_n = len(boxes)
-        self.synced_n = 0
-        self.status_label = "on %s, not in Keymaker" % ", ".join(b for b, _ in boxes)
-        self.adopt_target_id = boxes[0][1] if len(boxes) == 1 else ""
+def ignored_index(env):
+    """{(key, target_label)} of decisions to leave a key alone. A blank
+    target_label means "on every box in this environment"."""
+    return {(i.key, i.target_label) for i in env.ignored_keys.all()}
 
 
-def server_only_rows(targets, checks, known_keys, view_target=None):
-    """Build the pseudo-rows for on-box-only keys, newest check wins.
+def is_ignored(ignored, key, target_label):
+    return (key, target_label) in ignored or (key, "") in ignored
+
+
+def adoption_rows(targets, checks, known_keys, ignored, view_target=None):
+    """Keys found on a box that Keymaker doesn't hold — the triage list.
 
     Only fresh checks contribute: a stale check's `on_box_only` list is no more
-    trustworthy than its green dots.
+    trustworthy than its green dots. Each row knows every box it was seen on, so
+    a key present on all of them can be adopted once as an all-targets value
+    rather than as one override per box.
     """
-    ids = {t.label: t.id for t in targets}
+    reachable = {t.label: t for t in checkable_targets(targets)}
     found = {}
     for label, (dc, fresh) in checks.items():
         if not fresh or (view_target is not None and label != view_target.label):
             continue
         for key in dc.on_box_only:
-            if key not in known_keys:
-                found.setdefault(key, []).append((label, ids.get(label, "")))
-    return [ServerOnlyRow(k, found[k]) for k in sorted(found)]
+            if key in known_keys or is_ignored(ignored, key, label):
+                continue
+            found.setdefault(key, []).append(reachable[label])
+
+    scope_total = 1 if view_target is not None else len(reachable)
+    rows = []
+    for key in sorted(found):
+        boxes = sorted(found[key], key=lambda t: t.label)
+        everywhere = len(boxes) == scope_total and scope_total > 1
+        rows.append({
+            "key": key,
+            "boxes": boxes,
+            "box_labels": [b.label for b in boxes],
+            # Adopt as a shared base value when the key is on every box we can
+            # see, as an override when only some boxes have it.
+            "adopt_target_id": "" if everywhere else boxes[0].id,
+            "adopt_scope": "all targets" if everywhere else boxes[0].label,
+            # Which box to read the value from. Values may legitimately differ
+            # between boxes; we adopt one and the next check reports the rest.
+            "source_target_id": boxes[0].id,
+        })
+    return rows
 
 
-def summarize(env_variables, extra_rows, checks, targets):
+def ignored_rows(env, view_target=None):
+    """Ignored keys, for the reversible list under the adoption panel."""
+    rows = list(env.ignored_keys.all())
+    if view_target is not None:
+        rows = [i for i in rows if i.target_label in ("", view_target.label)]
+    return rows
+
+
+def summarize(env_variables, adoptions, checks, targets):
     """Environment-level headline: how much of this env we can actually vouch for."""
     reachable = checkable_targets(targets)
     checked = [lbl for lbl, (_, fresh) in checks.items() if fresh]
     stamps = [dc.checked_at for dc, fresh in checks.values() if fresh and dc]
     counts = {DRIFTED: 0, KEYMAKER_ONLY: 0, UNKNOWN: 0, SYNCED: 0}
     for v in env_variables:
-        for _, status in getattr(v, "sync", []):
-            if status in counts:
-                counts[status] += 1
+        for box in getattr(v, "sync", []):
+            if box.status in counts:
+                counts[box.status] += 1
     return {
         "targets_total": len(reachable),
         "targets_checked": len(checked),
@@ -186,8 +232,8 @@ def summarize(env_variables, extra_rows, checks, targets):
         "last_checked_at": max(stamps) if stamps else None,
         "drifted": counts[DRIFTED],
         "keymaker_only": counts[KEYMAKER_ONLY],
-        "server_only": len(extra_rows),
+        "server_only": len(adoptions),
         "unknown": counts[UNKNOWN],
         "synced": counts[SYNCED],
-        "clean": not (counts[DRIFTED] or counts[KEYMAKER_ONLY] or counts[UNKNOWN] or extra_rows),
+        "clean": not (counts[DRIFTED] or counts[KEYMAKER_ONLY] or counts[UNKNOWN] or adoptions),
     }

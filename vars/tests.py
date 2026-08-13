@@ -1,5 +1,8 @@
 """Tests for keymaker core behavior."""
 import json
+import os
+import shutil
+import tempfile
 from datetime import timedelta
 from unittest import mock
 
@@ -9,8 +12,8 @@ from rest_framework.test import APIClient
 
 from cryptography.fernet import Fernet
 
-from . import auth, crypto, sync
-from .models import DriftCheck, Environment, Target, Variable
+from . import auth, crypto, drift, sync
+from .models import DriftCheck, Environment, IgnoredKey, Target, Variable
 
 TEST_KEY = Fernet.generate_key().decode()
 API_KEY = "test-keymaker-key"
@@ -590,9 +593,13 @@ class DriftCheckCommandTests(TestCase):
                                                 detail__contains="dokku-managed +1").exists())
 
 
+@mock.patch.dict(os.environ, {"KEYMAKER_SIM_BOX_DIR": ""})
 class DriftConfigParsingTests(TestCase):
     """The dokku_config / meaningful helpers: JSON path, envfile fallback, and
-    the noise filter — pure parsing, subprocess mocked."""
+    the noise filter — pure parsing, subprocess mocked.
+
+    Pinned to the real SSH path: a dev container with simulated boxes switched
+    on would otherwise short-circuit these and leave the parsing untested."""
 
     MOD = "vars.drift"
 
@@ -1122,20 +1129,23 @@ class SyncStatusTests(TestCase):
     def _rows(self, resp):
         return {v.key: v for v in resp.context["variables"]}
 
+    def _adoptions(self, resp):
+        return {a["key"]: a for a in resp.context["adoptions"]}
+
     def test_fresh_check_classifies_each_bucket(self):
         for label in ("boxA", "boxB"):
             self._check(label, mismatch=["DIFFERS"], km_only=["NOT_ON_BOX"])
         self._login()
         rows = self._rows(self.client.get(f"/environments/{self.env.slug}/"))
-        self.assertEqual({s for _, s in rows["MATCHES"].sync}, {sync.SYNCED})
-        self.assertEqual({s for _, s in rows["DIFFERS"].sync}, {sync.DRIFTED})
-        self.assertEqual({s for _, s in rows["NOT_ON_BOX"].sync}, {sync.KEYMAKER_ONLY})
+        self.assertEqual({b.status for b in rows["MATCHES"].sync}, {sync.SYNCED})
+        self.assertEqual({b.status for b in rows["DIFFERS"].sync}, {sync.DRIFTED})
+        self.assertEqual({b.status for b in rows["NOT_ON_BOX"].sync}, {sync.KEYMAKER_ONLY})
 
     def test_never_checked_is_unknown_not_synced(self):
         """The regression that motivated this: no check must never render as green."""
         self._login()
         rows = self._rows(self.client.get(f"/environments/{self.env.slug}/"))
-        self.assertEqual({s for _, s in rows["MATCHES"].sync}, {sync.UNKNOWN})
+        self.assertEqual({b.status for b in rows["MATCHES"].sync}, {sync.UNKNOWN})
         self.assertEqual(rows["MATCHES"].synced_n, 0)
 
     def test_stale_check_degrades_to_unknown(self):
@@ -1143,7 +1153,7 @@ class SyncStatusTests(TestCase):
         self._check("boxB", age_hours=100)
         self._login()
         rows = self._rows(self.client.get(f"/environments/{self.env.slug}/"))
-        self.assertEqual({s for _, s in rows["MATCHES"].sync}, {sync.UNKNOWN})
+        self.assertEqual({b.status for b in rows["MATCHES"].sync}, {sync.UNKNOWN})
 
     def test_rollup_counts_per_box(self):
         self._check("boxA")                            # everything matches
@@ -1152,34 +1162,44 @@ class SyncStatusTests(TestCase):
         rows = self._rows(self.client.get(f"/environments/{self.env.slug}/"))
         self.assertEqual((rows["MATCHES"].synced_n, rows["MATCHES"].total_n), (2, 2))
         self.assertEqual((rows["DIFFERS"].synced_n, rows["DIFFERS"].total_n), (1, 2))
-        self.assertEqual(sorted(s for _, s in rows["DIFFERS"].sync), [sync.DRIFTED, sync.SYNCED])
+        self.assertEqual(sorted(b.status for b in rows["DIFFERS"].sync), [sync.DRIFTED, sync.SYNCED])
 
-    def test_server_only_key_becomes_a_row(self):
+    def test_server_only_key_goes_to_the_adoption_panel_not_the_table(self):
+        """Keymaker holds no value for it, so it is triage — not a variable row."""
         self._check("boxA", on_box=["STRAY_KEY"])
         self._check("boxB")
         self._login()
         resp = self.client.get(f"/environments/{self.env.slug}/")
-        rows = self._rows(resp)
-        self.assertIn("STRAY_KEY", rows)
-        stray = rows["STRAY_KEY"]
-        self.assertTrue(stray.is_server_only)
-        self.assertIsNone(stray.id)                       # no Variable backs it
-        self.assertEqual(stray.adopt_target_id, self.tA.id)
+        self.assertNotIn("STRAY_KEY", self._rows(resp))
+        adopt = self._adoptions(resp)
+        self.assertIn("STRAY_KEY", adopt)
+        self.assertEqual(adopt["STRAY_KEY"]["box_labels"], ["boxA"])
+        self.assertEqual(adopt["STRAY_KEY"]["adopt_target_id"], self.tA.id)  # one box -> override
         self.assertEqual(resp.context["summary"]["server_only"], 1)
+
+    def test_key_on_every_box_adopts_once_for_all_targets(self):
+        self._check("boxA", on_box=["STRAY_KEY"])
+        self._check("boxB", on_box=["STRAY_KEY"])
+        self._login()
+        row = self._adoptions(self.client.get(f"/environments/{self.env.slug}/"))["STRAY_KEY"]
+        self.assertEqual(row["adopt_target_id"], "")      # base value, not two overrides
+        self.assertEqual(row["box_labels"], ["boxA", "boxB"])
 
     def test_server_only_ignored_when_stale(self):
         """A stale check's on-box list is no more trustworthy than its dots."""
         self._check("boxA", on_box=["STRAY_KEY"], age_hours=100)
         self._login()
-        self.assertNotIn("STRAY_KEY", self._rows(self.client.get(f"/environments/{self.env.slug}/")))
+        resp = self.client.get(f"/environments/{self.env.slug}/")
+        self.assertNotIn("STRAY_KEY", self._adoptions(resp))
 
-    def test_adopted_key_stops_being_server_only(self):
+    def test_adopted_key_leaves_the_adoption_panel(self):
         self._check("boxA", on_box=["STRAY_KEY"])
         v = Variable(environment=self.env, key="STRAY_KEY", target=self.tA)
         v.set_value("adopted"); v.save()
         self._login()
-        rows = self._rows(self.client.get(f"/environments/{self.env.slug}/"))
-        self.assertFalse(getattr(rows["STRAY_KEY"], "is_server_only", False))
+        resp = self.client.get(f"/environments/{self.env.slug}/")
+        self.assertNotIn("STRAY_KEY", self._adoptions(resp))
+        self.assertIn("STRAY_KEY", self._rows(resp))      # it's a real variable now
 
     def test_target_filter_narrows_to_that_box(self):
         self._check("boxA", mismatch=["DIFFERS"])
@@ -1197,7 +1217,7 @@ class SyncStatusTests(TestCase):
         self._check("boxB", km_only=["ONLY_A"])   # boxB legitimately lacks it
         self._login()
         rows = self._rows(self.client.get(f"/environments/{self.env.slug}/"))
-        self.assertEqual([lbl for lbl, _ in rows["ONLY_A"].sync], ["boxA"])
+        self.assertEqual([b.label for b in rows["ONLY_A"].sync], ["boxA"])
         self.assertEqual(rows["ONLY_A"].status, sync.SYNCED)
 
     def test_managed_keys_are_outside_sync(self):
@@ -1227,3 +1247,176 @@ class SyncStatusTests(TestCase):
         self._check("boxA"); self._check("boxB")
         self._login()
         self.assertTrue(self.client.get(f"/environments/{self.env.slug}/").context["summary"]["clean"])
+
+
+@override_settings(KEYMAKER_MASTER_KEYS=[TEST_KEY], KEYMAKER_KEY=API_KEY,
+                   STATICFILES_STORAGE="django.contrib.staticfiles.storage.StaticFilesStorage")
+class SyncActionTests(TestCase):
+    """Adopt / ignore / push — the three answers to drift, done from the env page.
+
+    These are the only paths that read from or write to a box, so each one is
+    checked for the thing that would be worst if it were wrong: adopting must
+    store the box's real value (never a placeholder), ignoring must be a recorded
+    and reversible decision, and pushing must touch only the keys a check
+    actually flagged.
+    """
+
+    def setUp(self):
+        crypto._fernet = None
+        self.tmp = tempfile.mkdtemp()
+        self.env = Environment.objects.create(slug="lab", name="Lab")
+        self.tA = Target.objects.create(environment=self.env, label="boxA",
+                                        host="10.0.0.1", dokku_app="lab-a")
+        self.tB = Target.objects.create(environment=self.env, label="boxB",
+                                        host="10.0.0.2", dokku_app="lab-b")
+        self.client.post("/login", {"key": API_KEY})
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _box(self, target, cfg):
+        with open(os.path.join(self.tmp, f"{target.host}__{target.dokku_app}.json"), "w") as fh:
+            json.dump(cfg, fh)
+
+    def _read_box(self, target):
+        with open(os.path.join(self.tmp, f"{target.host}__{target.dokku_app}.json")) as fh:
+            return json.load(fh)
+
+    def _var(self, key, value, target=None):
+        v = Variable(environment=self.env, key=key, target=target)
+        v.set_value(value); v.save()
+        return v
+
+    def _check(self, label, **kw):
+        return DriftCheck.objects.create(environment=self.env, target_label=label, **kw)
+
+    def _sim(self):
+        return mock.patch.dict(os.environ, {"KEYMAKER_SIM_BOX_DIR": self.tmp})
+
+    def _post(self, path, **data):
+        return self.client.post(f"/environments/{self.env.slug}/sync/{path}", data)
+
+    # --- adopt ------------------------------------------------------------
+
+    def test_adopt_stores_the_value_read_off_the_box(self):
+        self._box(self.tA, {"STRAY": "real-value-from-box"})
+        self._box(self.tB, {})
+        self._check("boxA", on_box_only=["STRAY"])
+        self._check("boxB")
+        with self._sim():
+            self._post("adopt", key="STRAY")
+        v = self.env.active_vars().get(key="STRAY")
+        self.assertEqual(v.value, "real-value-from-box")
+        self.assertEqual(v.target, self.tA)     # seen on one box -> an override
+        self.assertTrue(v.is_secret)            # unknown provenance: mask by default
+
+    def test_adopt_skips_a_key_that_vanished_since_the_check(self):
+        """Never invent a value: if the box no longer has it, store nothing."""
+        self._box(self.tA, {})                  # gone since the check ran
+        self._check("boxA", on_box_only=["STRAY"])
+        with self._sim():
+            self._post("adopt", key="STRAY")
+        self.assertFalse(self.env.active_vars().filter(key="STRAY").exists())
+
+    def test_adopt_refuses_keys_no_check_reported(self):
+        """Scope comes from the checks, not the form — a forged key adopts nothing."""
+        self._box(self.tA, {"SECRET_SAUCE": "x"})
+        self._check("boxA")                     # clean check: nothing on_box_only
+        with self._sim():
+            self._post("adopt", key="SECRET_SAUCE")
+        self.assertFalse(self.env.active_vars().filter(key="SECRET_SAUCE").exists())
+
+    def test_adopt_rechecks_so_the_status_is_measured(self):
+        self._box(self.tA, {"STRAY": "v"})
+        self._check("boxA", on_box_only=["STRAY"])
+        with self._sim():
+            self._post("adopt", key="STRAY")
+        latest = self.env.drift_checks.filter(target_label="boxA").first()
+        self.assertEqual(latest.on_box_only, [])   # a fresh check, not the stale one
+
+    # --- ignore -----------------------------------------------------------
+
+    def test_ignore_removes_it_from_triage_and_is_reversible(self):
+        self._box(self.tA, {"APP_VERSION": "1"})
+        self._check("boxA", on_box_only=["APP_VERSION"])
+        self._post("ignore", key="APP_VERSION", reason="injected by the deploy")
+        row = IgnoredKey.objects.get(key="APP_VERSION")
+        self.assertEqual(row.reason, "injected by the deploy")
+        self.assertEqual(row.target_label, "")     # ignored from the all-targets view
+        resp = self.client.get(f"/environments/{self.env.slug}/")
+        self.assertEqual(resp.context["adoptions"], [])
+        self.assertEqual(resp.context["summary"]["server_only"], 0)
+
+        self.client.post(f"/environments/{self.env.slug}/sync/ignore/{row.id}/undo")
+        resp = self.client.get(f"/environments/{self.env.slug}/")
+        self.assertEqual([a["key"] for a in resp.context["adoptions"]], ["APP_VERSION"])
+
+    def test_ignoring_from_one_target_does_not_silence_the_others(self):
+        self._check("boxA", on_box_only=["STRAY"])
+        self._check("boxB", on_box_only=["STRAY"])
+        self.client.post(f"/environments/{self.env.slug}/sync/ignore",
+                         {"key": "STRAY", "view_target": self.tA.id})
+        self.assertEqual(IgnoredKey.objects.get(key="STRAY").target_label, "boxA")
+        # Still reported on boxB, and still reported in the all-targets rollup.
+        resp = self.client.get(f"/environments/{self.env.slug}/?target={self.tB.id}")
+        self.assertEqual([a["key"] for a in resp.context["adoptions"]], ["STRAY"])
+        resp = self.client.get(f"/environments/{self.env.slug}/")
+        self.assertEqual([a["box_labels"] for a in resp.context["adoptions"]], [["boxB"]])
+
+    # --- push -------------------------------------------------------------
+
+    def test_push_sends_only_what_the_check_flagged(self):
+        self._var("MATCHES", "same")
+        self._var("MISSING", "needed")
+        self._box(self.tA, {"MATCHES": "same"})
+        self._check("boxA", in_keymaker_only=["MISSING"])
+        with self._sim():
+            self._post("push", key=["MISSING", "MATCHES"])
+        box = self._read_box(self.tA)
+        self.assertEqual(box["MISSING"], "needed")
+        self.assertEqual(box["MATCHES"], "same")   # untouched, it already agreed
+
+    def test_push_refuses_a_key_the_check_says_is_in_sync(self):
+        """A synced key is not pushable, so this can't blanket-overwrite a box."""
+        self._var("MATCHES", "keymaker-side")
+        self._box(self.tA, {"MATCHES": "box-side"})
+        self._check("boxA")                        # reports everything in sync
+        with self._sim():
+            self._post("push", key="MATCHES")
+        self.assertEqual(self._read_box(self.tA)["MATCHES"], "box-side")
+
+    def test_push_sends_each_box_its_own_resolved_value(self):
+        self._var("HOSTS", "base")
+        self._var("HOSTS", "just-for-b", target=self.tB)
+        self._box(self.tA, {})
+        self._box(self.tB, {})
+        self._check("boxA", in_keymaker_only=["HOSTS"])
+        self._check("boxB", in_keymaker_only=["HOSTS"])
+        with self._sim():
+            self._post("push", key="HOSTS")
+        self.assertEqual(self._read_box(self.tA)["HOSTS"], "base")
+        self.assertEqual(self._read_box(self.tB)["HOSTS"], "just-for-b")
+
+    def test_push_rejects_multi_line_values_instead_of_truncating(self):
+        with self.assertRaises(RuntimeError):
+            drift.push_values([], "h", "app", {"KEY": "line1\nline2"})
+
+    def test_pushable_only_covers_drifted_and_missing(self):
+        self.assertEqual(set(sync.PUSHABLE), {sync.DRIFTED, sync.KEYMAKER_ONLY})
+
+    # --- guardrails -------------------------------------------------------
+
+    def test_simulated_boxes_are_off_unless_explicitly_configured(self):
+        """The sim path must never engage on a server that didn't ask for it."""
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(drift.sim_dir(), "")
+
+    def test_htmx_row_refresh_keeps_the_status_column(self):
+        """Saving a variable re-renders the rows; un-annotated rows would blank
+        the Status column and quietly report nothing at all."""
+        v = self._var("MATCHES", "v")
+        self._check("boxA", checked_at=timezone.now())
+        self._check("boxB", checked_at=timezone.now())
+        resp = self.client.post(f"/environments/{self.env.slug}/variables/save",
+                                {"id": v.id, "key": "MATCHES", "value": "v2"})
+        self.assertContains(resp, "sync-dot")

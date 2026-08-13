@@ -1,0 +1,11 @@
+{% comment %}Run the drift check for this environment without leaving the page.
+`next` brings the user straight back here (target filter intact) so checking is
+something you do in place, not a trip to the fleet-wide Checks page.{% endcomment %}
+<form method="post" action="{% url 'checks_run' %}" style="display:inline">
+  {% csrf_token %}
+  <input type="hidden" name="env" value="{{ env.slug }}">
+  {% if view_target %}<input type="hidden" name="target" value="{{ view_target.label }}">{% endif %}
+  <input type="hidden" name="next" value="{{ request.get_full_path }}">
+  <button type="submit" class="btn-inline"
+          title="SSH to {% if view_target %}{{ view_target.label }}{% else %}each box{% endif %} and compare its live config to Keymaker right now">check now →</button>
+</form>

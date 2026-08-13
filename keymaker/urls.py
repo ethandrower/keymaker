@@ -21,6 +21,13 @@ urlpatterns = [
     path("environments/<slug:slug>/variables/<int:var_id>/restore", views.variable_restore, name="variable_restore"),
     path("environments/<slug:slug>/variables/<int:var_id>/reveal", views.variable_reveal, name="variable_reveal"),
 
+    # Sync actions against the boxes (admin): adopt on-box keys, ignore them, push ours out
+    path("environments/<slug:slug>/sync/adopt", views.variables_adopt, name="variables_adopt"),
+    path("environments/<slug:slug>/sync/ignore", views.variables_ignore, name="variables_ignore"),
+    path("environments/<slug:slug>/sync/ignore/<int:ignored_id>/undo",
+         views.variables_unignore, name="variables_unignore"),
+    path("environments/<slug:slug>/sync/push", views.variables_push, name="variables_push"),
+
     # Environment + target management (admin)
     path("environments/new", views.environment_create, name="environment_create"),
     path("environments/<slug:slug>/archive", views.environment_archive, name="environment_archive"),

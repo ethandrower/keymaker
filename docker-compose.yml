@@ -22,6 +22,10 @@ services:
       - .env
     environment:
       DATABASE_URL: postgres://keymaker:keymaker@db:5432/keymaker
+      # Local only: drift reads/writes JSON files here instead of SSHing to a
+      # Dokku host, so the check → adopt → push loop is exercisable with no real
+      # boxes. Production must never set this. See vars/drift.py + seed_sim_boxes.
+      KEYMAKER_SIM_BOX_DIR: /app/.simboxes
     volumes:
       - .:/app
     ports:

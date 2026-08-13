@@ -1,0 +1,90 @@
+{% comment %}Triage for keys found on a box that Keymaker doesn't hold.
+
+These are deliberately NOT rows in the variables table — Keymaker has no value
+for them, so there is nothing to show or export. They are a decision queue with
+exactly two answers: adopt (read the value off the box and start managing it) or
+ignore (leave it alone and stop reporting it). Ignoring is recorded and undoable
+so the list below it stays honest about what we chose to look away from.{% endcomment %}
+{% if adoptions or ignored %}
+<div class="adopt-panel" x-data="{ sel: [], reason: '',
+       toggleAll(on){ this.sel = on ? [{% for a in adoptions %}'{{ a.key|escapejs }}'{% if not forloop.last %},{% endif %}{% endfor %}] : [] } }">
+  {% if adoptions %}
+    <form method="post" action="{% url 'variables_adopt' env.slug %}">
+      {% csrf_token %}
+      <input type="hidden" name="view_target" value="{{ view_target.id|default_if_none:'' }}">
+      <input type="hidden" name="reason" :value="reason">
+      <div class="adopt-head">
+        <strong><span class="sync-dot server_only">◆</span> On the box, not in Keymaker</strong>
+        <span class="muted small">{{ adoptions|length }} key{{ adoptions|length|pluralize }} set on
+          {% if view_target %}<code>{{ view_target.label }}</code>{% else %}a server{% endif %}
+          that Keymaker doesn't manage. Adopt reads the value off the box.</span>
+      </div>
+      <table class="mini adopt-table">
+        <thead>
+          <tr>
+            {% if user.is_admin %}<th style="width:22px"><input type="checkbox" @change="toggleAll($event.target.checked)"
+                   title="Select all"></th>{% endif %}
+            <th>Key</th><th>Seen on</th><th>Would be stored as</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for a in adoptions %}
+            <tr>
+              {% if user.is_admin %}<td><input type="checkbox" name="key" value="{{ a.key }}" x-model="sel"></td>{% endif %}
+              <td class="key"><code>{{ a.key }}</code></td>
+              <td>{% for b in a.boxes %}<span class="badge target">{{ b.label }}</span>{% endfor %}</td>
+              <td class="muted small">
+                {% if a.adopt_target_id %}override for <code>{{ a.adopt_scope }}</code>
+                {% else %}one value for <code>all targets</code>{% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% if user.is_admin %}
+        <div class="adopt-actions">
+          <button class="btn small primary" type="submit" :disabled="sel.length === 0"
+                  @click="if(!confirm('Read '+sel.length+' value(s) off the box and store them in Keymaker?')) $event.preventDefault()">
+            Store in Keymaker <span x-show="sel.length" x-text="'('+sel.length+')'"></span>
+          </button>
+          <button class="btn small" type="submit" formaction="{% url 'variables_ignore' env.slug %}"
+                  :disabled="sel.length === 0"
+                  @click="reason = prompt('Ignore '+sel.length+' key(s) on {% if view_target %}{{ view_target.label|escapejs }}{% else %}all targets{% endif %} — why? (undoable)') ?? ''; if(reason === '' ) $event.preventDefault()">
+            Ignore…
+          </button>
+          <span class="muted small">Ignore leaves the key on the box and stops reporting it.
+            Adopt stores it here so it survives a rebuild.</span>
+        </div>
+      {% endif %}
+    </form>
+  {% endif %}
+
+  {% if ignored %}
+    <details class="ignored-list">
+      <summary class="muted small">🙈 Ignored ({{ ignored|length }}) — deliberately not managed by Keymaker</summary>
+      <table class="mini">
+        <thead><tr><th>Key</th><th>Scope</th><th>Reason</th><th>By</th>{% if user.is_admin %}<th></th>{% endif %}</tr></thead>
+        <tbody>
+          {% for i in ignored %}
+            <tr>
+              <td><code>{{ i.key }}</code></td>
+              <td class="muted small">{{ i.scope_label }}</td>
+              <td class="muted small">{{ i.reason|default:"—" }}</td>
+              <td class="muted small">{{ i.created_by|default:"—" }} · {{ i.created_at|date:"Y-m-d" }}</td>
+              {% if user.is_admin %}
+                <td>
+                  <form method="post" action="{% url 'variables_unignore' env.slug i.id %}" style="display:inline">
+                    {% csrf_token %}
+                    <input type="hidden" name="view_target" value="{{ view_target.id|default_if_none:'' }}">
+                    <button class="btn small" type="submit" title="Report this key again">Un-ignore</button>
+                  </form>
+                </td>
+              {% endif %}
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </details>
+  {% endif %}
+</div>
+{% endif %}

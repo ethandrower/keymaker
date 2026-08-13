@@ -189,8 +189,21 @@ See [`client/README.md`](client/README.md). It runs on each Dokku host, polls
 
 A scheduled job compares each target's **live** Dokku config against what Keymaker
 holds and records the differences as `DriftCheck` rows (key **names** only, never
-values) — surfacing keys set directly on a box, missing keys, and value drift on
-the **Checks** page and per-key liveness badges.
+values). Every environment page then shows, per key, how it compares to each box
+it belongs on — in sync, value differs, in Keymaker but not on the box, on the box
+but not in Keymaker, or **not checked** (no check in 48h; never rendered as green).
+
+Three actions close the loop, all from the environment page:
+
+| Situation | Action | What it does |
+|---|---|---|
+| On the box, not in Keymaker | **Store in Keymaker** | Reads the live value off the box and stores it (checks carry names only, so this is the one path that fetches a value from a server) |
+| On the box, and we don't want it | **Ignore** | Records a reversible decision so deploy-injected keys stop being reported |
+| In Keymaker, box missing it or disagreeing | **send →** | `dokku config:set --no-restart` — the value lands now, the app picks it up on its next restart or deploy |
+
+Adopt and push re-run the check on the box they touched, so the status you land
+back on is measured rather than assumed. Only keys a check actually flagged can
+be pushed, so this can't be used to blanket-overwrite a box.
 
 - **Schedule** — defined in [`app.json`](app.json)'s `cron` block (daily 07:00
   UTC), applied automatically by Dokku on deploy. No host crontab to maintain.
@@ -201,6 +214,16 @@ the **Checks** page and per-key liveness badges.
   app, and run [`client/setup-drift.sh`](client/setup-drift.sh) **once** to
   register the matching public key on the hosts. Without this, drift checks
   record an error instead of data.
+- **Working on this locally** — `KEYMAKER_SIM_BOX_DIR` (set for you in
+  `docker-compose.yml`) points drift at a directory of `<host>__<app>.json` files
+  instead of SSH, so the whole check → adopt → push loop works with no real hosts:
+
+  ```bash
+  docker compose exec web python manage.py seed_sim_boxes   # fake boxes with planted drift
+  docker compose exec web python manage.py drift_check
+  ```
+
+  Production must never set this variable; `sim_dir()` is off unless it's present.
 
 ## Deploying on Dokku
 

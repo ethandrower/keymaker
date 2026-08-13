@@ -5,15 +5,26 @@ Used by both the scheduled `drift_check` management command and the on-demand
 target's live config over SSH, compares against Keymaker's resolved values, and
 records a DriftCheck row (key NAMES only, never values).
 
+Also the only place that *writes* to a box (`push_values`, used by "send to app
+server"). Writes default to --no-restart: a click in a web UI must never bounce
+production on its own.
+
 SSH auth: a private key from config var KEYMAKER_SSH_KEY_B64 (base64), whose
 public half is registered as a `dokku` ssh-key on each Dokku host (see
 client/setup-drift.sh). Falls back to the ambient SSH config when unset.
+
+Local development: set KEYMAKER_SIM_BOX_DIR to a directory of
+`<host>__<app>.json` files and every read/write hits those files instead of
+SSH, so the whole check → adopt → push → re-check loop is exercisable without a
+real Dokku host. Unset in production, where it must stay unset.
 """
 import base64
 import json
 import os
+import shlex
 import subprocess
 import tempfile
+import time
 
 from .models import AuditLog, DriftCheck
 
@@ -52,9 +63,40 @@ def build_ssh_base(key_path=None, connect_timeout=15):
     return base, (tmp.name if tmp else None)
 
 
+# --- simulated boxes (local dev only) -------------------------------------
+
+def sim_dir():
+    """Directory of fake box configs, or "" when we talk to real hosts."""
+    return os.environ.get("KEYMAKER_SIM_BOX_DIR", "").strip()
+
+
+def _sim_path(host, app):
+    safe = f"{host}__{app}".replace("/", "_")
+    return os.path.join(sim_dir(), f"{safe}.json")
+
+
+def _sim_read(host, app):
+    try:
+        with open(_sim_path(host, app)) as fh:
+            return json.load(fh)
+    except FileNotFoundError:
+        raise RuntimeError(f"simulated box {host}/{app} does not exist")
+
+
+def _sim_write(host, app, values):
+    cfg = _sim_read(host, app)
+    cfg.update(values)
+    with open(_sim_path(host, app), "w") as fh:
+        json.dump(cfg, fh, indent=2, sort_keys=True)
+
+
+# --- real box I/O ---------------------------------------------------------
+
 def dokku_config(ssh_base, host, app):
     """Return the full live {KEY: VALUE} for a Dokku app over SSH (json, envfile
     fallback). Raises RuntimeError if the read fails."""
+    if sim_dir():
+        return _sim_read(host, app)
     cmd = ssh_base + [f"dokku@{host}", "config:export", "--format", "json", app]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=40)
     if r.returncode == 0:
@@ -75,6 +117,42 @@ def dokku_config(ssh_base, host, app):
             k, _, v = line.partition("=")
             cfg[k.strip()] = v.strip().strip("'\"")
     return cfg
+
+
+def read_values(ssh_base, host, app, keys):
+    """Pull the live values for specific keys off a box.
+
+    Drift checks record key names only, so adopting an on-box key has to come
+    back here for the value. Keys absent from the box are simply omitted — the
+    caller reports them rather than storing an empty string as if it were real.
+    """
+    cfg = dokku_config(ssh_base, host, app)
+    return {k: cfg[k] for k in keys if k in cfg}
+
+
+def push_values(ssh_base, host, app, values, restart=False):
+    """Set keys on a box: `dokku config:set [--no-restart] <app> K=V …`.
+
+    The only write Keymaker makes to a box. Defaults to --no-restart so a UI
+    click can't bounce production; the caller tells the user the app needs a
+    restart or deploy for the change to take effect.
+    """
+    if not values:
+        return
+    bad = sorted(k for k, v in values.items() if "\n" in v or "\r" in v)
+    if bad:
+        # Dokku takes config over a single shell command line; a newline would
+        # truncate the value on the box rather than fail loudly.
+        raise RuntimeError(f"can't push multi-line values: {', '.join(bad)}")
+    if sim_dir():
+        _sim_write(host, app, values)
+        return
+    args = ["config:set"] + ([] if restart else ["--no-restart"]) + [app]
+    args += [f"{k}={v}" for k, v in sorted(values.items())]
+    cmd = ssh_base + [f"dokku@{host}"] + [shlex.quote(a) for a in args]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip() or "dokku config:set failed")
 
 
 def check_one(env, target, ssh_base, actor="drift-cron"):
@@ -112,3 +190,34 @@ def check_one(env, target, ssh_base, actor="drift-cron"):
                 + mgd_note),
     )
     return dc, mgd_added, mgd_gone
+
+
+def run_checks(env, targets, actor, budget_s=22.0, connect_timeout=8):
+    """Check a list of targets now, bounded by a wall-clock budget.
+
+    Shared by the Checks page, the environment page, and every write action
+    (adopt/push re-check the box they just touched, so the status a user sees
+    afterwards is a fresh measurement rather than an optimistic assumption).
+
+    Returns (checked_labels, errors, not_reached).
+    """
+    targets = [t for t in targets if t.host and t.dokku_app]
+    if not targets:
+        return [], [], 0
+    ssh_base, tmp = build_ssh_base(connect_timeout=connect_timeout)
+    start = time.monotonic()
+    checked, errors, not_reached = [], [], 0
+    try:
+        for t in targets:
+            if time.monotonic() - start > budget_s:
+                not_reached = len(targets) - len(checked) - len(errors)
+                break
+            try:
+                check_one(env, t, ssh_base, actor=actor)
+                checked.append(t.label)
+            except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+                errors.append(f"{t.label}: {str(exc)[:200]}")
+    finally:
+        if tmp:
+            os.unlink(tmp)
+    return checked, errors, not_reached
