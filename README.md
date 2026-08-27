@@ -66,7 +66,7 @@ docker compose exec web python manage.py test vars
 | Var | Purpose |
 | --- | --- |
 | `KEYMAKER_MASTER_KEY` | Fernet key(s), comma-separated. **First is primary for new writes; keep old keys to decrypt during rotation. Back this up — losing it loses all secrets.** |
-| `KEYMAKER_KEY` | The single auth key for UI login **and** API bearer. Blank = open (local dev only); production MUST set a strong value. |
+| `KEYMAKER_KEY` | The single auth key for UI login **and** API bearer (`km_…`). **Not** the master key above — mixing the two is the usual cause of a `401`. Blank = open (local dev only); production MUST set a strong value. |
 | `DJANGO_SECRET_KEY` | Django session/signing key |
 | `DATABASE_URL` | Postgres connection string |
 | `KEYMAKER_BASE_URL` | Public URL, used as the CSRF trusted origin in production |
@@ -125,12 +125,94 @@ UI users can also click **⬇ Download .env** on any environment page (with an
 
 ## For Claude / agents — quickstart
 
-Keymaker is built to be driven by agents. The whole surface is one base URL + the
-one key; everything below is copy-pasteable.
+Keymaker is built to be driven by agents: one base URL, one key, native MCP tools.
+Setup is **once per machine** and takes a minute.
+
+### 1. Get the right key
+
+`KEYMAKER_KEY` is the **API bearer token / UI password**. It starts with `km_`.
+
+> **Don't confuse it with `KEYMAKER_MASTER_KEY`** — the 44-character Fernet key
+> ending in `=` that encrypts values at rest. They are different secrets with
+> similar names. Sending the master key as the bearer gets you
+> `401 {"error": "Invalid or missing key"}`, which is the single most common
+> setup failure.
+
+Ask an admin, or read it off the host:
+
+```bash
+ssh dokku@<keymaker-host> config:get keymaker KEYMAKER_KEY
+```
+
+### 2. Give every Claude session the key
+
+Add it to `~/.claude/settings.json`. This reaches **all projects and all agents on
+the machine**, including sessions not launched from an interactive shell:
+
+```json
+{
+  "env": { "KEYMAKER_KEY": "km_your_key_here" }
+}
+```
+
+```bash
+chmod 600 ~/.claude/settings.json
+```
+
+A `export KEYMAKER_KEY=...` in `~/.zshrc` also works, but only for sessions started
+from a shell that sourced it — background jobs and some IDE launches miss it.
+
+### 3. Register the MCP server
+
+**Per repo** (commit it — the key stays out of the file). Create `.mcp.json` in the
+repo root; Claude Code picks it up automatically:
+
+```json
+{
+  "mcpServers": {
+    "keymaker": {
+      "type": "http",
+      "url": "https://keymaker.citemed.com/mcp",
+      "headers": { "Authorization": "Bearer ${KEYMAKER_KEY}" }
+    }
+  }
+}
+```
+
+**Or once for every project on the machine:**
+
+```bash
+claude mcp add --scope user --transport http keymaker \
+  https://keymaker.citemed.com/mcp -H 'Authorization: Bearer ${KEYMAKER_KEY}'
+```
+
+Keep the literal `${KEYMAKER_KEY}` — Claude Code expands it per session, so the
+secret never lands in a config file or a repo.
+
+### 4. Verify
+
+```bash
+# 200 = working, 401 = wrong or missing key
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -H "Authorization: Bearer $KEYMAKER_KEY" https://keymaker.citemed.com/api/v1/inventory
+```
+
+In Claude Code, `/mcp` should list **keymaker** as connected. Then just ask:
+*"what environments exist in keymaker?"*
+
+**Restart the session after changing the key or the MCP config** — running sessions
+pick up neither.
+
+| Symptom | Cause |
+| --- | --- |
+| `401 Invalid or missing key` | Master key used instead of the `km_` bearer, or `KEYMAKER_KEY` was unset when the session started |
+| `keymaker` missing from `/mcp` | Config added after the session started — restart it |
+| Server receives a literal `${KEYMAKER_KEY}` | The var isn't in the session's environment — use the `settings.json` `env` block in step 2 |
+
+### REST, if you'd rather curl
 
 ```bash
 export KEYMAKER_URL=https://keymaker.citemed.com
-export KEYMAKER_KEY=...   # the same key humans log in with
 
 # read an environment as JSON or .env
 curl -s -H "Authorization: Bearer $KEYMAKER_KEY" "$KEYMAKER_URL/api/v1/environments/staging/variables"
@@ -143,16 +225,10 @@ curl -s -X DELETE -H "Authorization: Bearer $KEYMAKER_KEY" \
   -d '{"reason":"removed in PR #123"}' "$KEYMAKER_URL/api/v1/environments/staging/variables/MY_KEY"
 ```
 
-### MCP — native tools for Claude Code
+### MCP tools
 
-Keymaker also speaks **MCP** at `POST /mcp` (the "streamable HTTP" transport). This
-is *not* a separate process — it's one more route in the same Django app, behind the
-same bearer key. Point any Claude Code at it once and it discovers the tools itself:
-
-```bash
-claude mcp add --transport http keymaker \
-  https://keymaker.citemed.com/mcp -H "Authorization: Bearer $KEYMAKER_KEY"
-```
+Keymaker speaks **MCP** at `POST /mcp` (streamable HTTP transport) — not a separate
+process, just one more route in the same Django app behind the same bearer key.
 
 Tools exposed (discoverable via `tools/list`):
 
