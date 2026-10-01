@@ -192,6 +192,39 @@ class DriftCheck(models.Model):
         return len(self.on_box_only) + len(self.in_keymaker_only) + len(self.value_mismatch)
 
 
+class IgnoredKey(models.Model):
+    """A key seen on a box that we have decided Keymaker should not own.
+
+    Without this, every drift check re-reports the same deploy-injected keys
+    (APP_VERSION, RELEASE_NOTES_LINK…) as "unadopted" forever, and the real
+    signal drowns in noise somebody already triaged. Ignoring is a *decision*,
+    so it records who made it and why, and it is always reversible.
+    """
+
+    environment = models.ForeignKey(Environment, related_name="ignored_keys", on_delete=models.CASCADE)
+    key = models.CharField(max_length=255)
+    # Blank = ignore this key on every target in the environment.
+    target_label = models.CharField(max_length=120, blank=True)
+    reason = models.CharField(max_length=400, blank=True)
+    created_by = models.CharField(max_length=150, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["key"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["environment", "key", "target_label"], name="uniq_ignored_key_scope"
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.environment.slug}:{self.key}"
+
+    @property
+    def scope_label(self) -> str:
+        return self.target_label or "All targets"
+
+
 class AuditLog(models.Model):
     """Append-only record of who changed what, when."""
 

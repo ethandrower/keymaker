@@ -9,8 +9,8 @@ from django.utils import timezone
 from django.utils.text import slugify
 from django.views.decorators.http import require_POST
 
-from . import auth, exporters, sync
-from .models import AuditLog, Environment, Target, Variable
+from . import auth, exporters, ops, sync
+from .models import AuditLog, Environment, IgnoredKey, Target, Variable
 
 
 # --- decorators -----------------------------------------------------------
@@ -89,35 +89,15 @@ def _env_target(env, ident):
         env.targets.filter(label=ident).first()
 
 
-def _sort_key(v):
-    """Server-only rows first (they need adopting), then the normal label/key order."""
-    return (0 if getattr(v, "is_server_only", False) else 1, v.label or "", v.key)
-
-
 @login_required
 def environment_detail(request, slug):
     env = get_object_or_404(Environment, slug=slug)
-    targets = env.targets.all()
     # Optional: scope the variable table to one target's resolved view (?target=<id>).
     view_target = _env_target(env, request.GET.get("target"))
-    # active_vars() is ordered by (label, key) so the template can {% regroup %}.
-    variables = list(env.active_vars())
-    if view_target:
-        # Resolved-for-target: base (all-targets) vars, with this target's overrides
-        # shadowing the matching base key; other targets' overrides are hidden.
-        override_keys = {v.key for v in variables if v.target_id == view_target.id}
-        variables = [v for v in variables
-                     if v.target_id == view_target.id
-                     or (v.target_id is None and v.key not in override_keys)]
-
     # Sync status: what each key actually looks like on the boxes it belongs on.
     # With no target selected this rolls up across every checkable target; with
     # one selected it narrows to that box's exact state.
-    checks = sync.latest_checks(env, targets)
-    sync.annotate(variables, targets, checks, view_target=view_target)
-    extra = sync.server_only_rows(targets, checks, {v.key for v in variables}, view_target=view_target)
-    summary = sync.summarize(variables, extra, checks, targets)
-    variables = sorted(variables + extra, key=_sort_key)
+    targets, variables, checks, adoptions = ops.sync_state(env, view_target)
     return render(
         request,
         "vars/environment_detail.html",
@@ -130,10 +110,124 @@ def environment_detail(request, slug):
             "archived": env.variables.filter(archived=True),
             "user": request.appuser,
             "managed_keys": settings.KEYMAKER_MANAGED_KEYS,
-            "summary": summary,                # env-level sync headline
+            "target_rows": ops.target_rows(env, checks),   # per-box check status
+            "pushable_n": sum(len(v.pushable) for v in variables),
+            "adoptions": adoptions,            # on the box, not in Keymaker — triage
+            "ignored": sync.ignored_rows(env, view_target=view_target),
+            "summary": sync.summarize(variables, adoptions, checks, targets),
             "stale_after_hours": int(sync.STALE_AFTER.total_seconds() // 3600),
         },
     )
+
+
+# --- sync actions (check / adopt / ignore / push) --------------------------
+# Thin wrappers: the work is in vars/ops.py, shared with the MCP server. These
+# only translate a result into flash messages and send the user back to the page
+# they were on.
+
+def _back_to_env(env, view_target):
+    url = f"/environments/{env.slug}/"
+    return redirect(f"{url}?target={view_target.id}" if view_target else url)
+
+
+def _actor(request):
+    return getattr(request.appuser, "username", "") or "user"
+
+
+def _names(items, limit=8):
+    items = sorted(items)
+    return ", ".join(items[:limit]) + ("…" if len(items) > limit else "")
+
+
+@login_required
+@require_POST
+def environment_check(request, slug):
+    """Compare this environment's boxes to Keymaker now (one target, or all)."""
+    env = get_object_or_404(Environment, slug=slug)
+    view_target = _env_target(env, request.POST.get("view_target"))
+    target = _env_target(env, request.POST.get("target"))
+    try:
+        r = ops.check(env, f"drift-ui:{_actor(request)}", target=target)
+    except ops.OpError as exc:
+        messages.info(request, str(exc))
+        return _back_to_env(env, view_target)
+    if r["checked"]:
+        messages.success(request, f"Checked {_names(r['checked'])}.")
+    for e in r["errors"]:
+        messages.error(request, f"Couldn't check {e}")
+    if r["not_reached"]:
+        messages.info(request, f"{r['not_reached']} target(s) not reached in time — check again to finish.")
+    return _back_to_env(env, view_target)
+
+
+@admin_required
+@require_POST
+def variables_adopt(request, slug):
+    env = get_object_or_404(Environment, slug=slug)
+    view_target = _env_target(env, request.POST.get("view_target"))
+    r = ops.adopt(env, _actor(request), keys=request.POST.getlist("key"),
+                  view_target=view_target, all_keys=request.POST.get("all") == "1")
+    if r["adopted"]:
+        per_box = sorted({a["key"] for a in r["adopted"] if a["scope"] != "all targets"})
+        messages.success(request, f"Stored {len({a['key'] for a in r['adopted']})} key(s) in Keymaker: "
+                                  + _names({a["key"] for a in r["adopted"]}))
+        if per_box and len(env.targets.all()) > 1:
+            messages.info(request, f"{len(per_box)} kept as per-box overrides because the boxes "
+                                   f"don't share one value: {_names(per_box)}")
+    elif not r["errors"]:
+        messages.error(request, "Nothing to adopt — those keys are no longer reported on a box.")
+    for e in r["errors"]:
+        messages.error(request, f"Couldn't read {e}")
+    if r["gone_from_box"]:
+        messages.warning(request, "No longer set on the box (skipped): " + _names(r["gone_from_box"]))
+    for e in r["recheck_errors"]:
+        messages.warning(request, f"Re-check failed — {e} (status below may be stale)")
+    return _back_to_env(env, view_target)
+
+
+@admin_required
+@require_POST
+def variables_ignore(request, slug):
+    env = get_object_or_404(Environment, slug=slug)
+    view_target = _env_target(env, request.POST.get("view_target"))
+    r = ops.ignore(env, _actor(request), request.POST.getlist("key"),
+                   reason=(request.POST.get("reason") or "").strip(), view_target=view_target)
+    if r["ignored"]:
+        messages.success(request, f"Ignoring {len(r['ignored'])} key(s) on {r['scope']} — "
+                                  "they stay on the box and stop being reported.")
+    return _back_to_env(env, view_target)
+
+
+@admin_required
+@require_POST
+def variables_unignore(request, slug, ignored_id):
+    env = get_object_or_404(Environment, slug=slug)
+    row = get_object_or_404(IgnoredKey, id=ignored_id, environment=env)
+    r = ops.unignore(env, _actor(request), row)
+    messages.success(request, f"{r['key']} will be reported again on {r['scope']}.")
+    return _back_to_env(env, _env_target(env, request.POST.get("view_target")))
+
+
+@admin_required
+@require_POST
+def variables_push(request, slug):
+    env = get_object_or_404(Environment, slug=slug)
+    view_target = _env_target(env, request.POST.get("view_target"))
+    r = ops.push(env, _actor(request), keys=request.POST.getlist("key"),
+                 view_target=view_target,
+                 only_target=_env_target(env, request.POST.get("target")),
+                 all_flagged=request.POST.get("all") == "1")
+    sent = sum(len(k) for k in r["pushed"].values())
+    if sent:
+        messages.success(request, f"Sent {sent} value(s) to {_names(r['pushed'])}. "
+                                  "Set with --no-restart — the app picks them up on its next restart or deploy.")
+    elif not r["errors"]:
+        messages.info(request, "Nothing to send — those keys already match the box.")
+    for e in r["errors"]:
+        messages.error(request, f"Push failed — {e}")
+    for e in r["recheck_errors"]:
+        messages.warning(request, f"Re-check failed — {e} (status below may be stale)")
+    return _back_to_env(env, view_target)
 
 
 @login_required
@@ -244,10 +338,16 @@ def variable_restore(request, slug, var_id):
 
 
 def _render_var_rows(request, env):
+    """Re-render the table body for an HTMX swap, with sync status intact — the
+    rows carry a Status column, so handing them back un-annotated would blank it
+    out after every save."""
+    view_target = _env_target(env, request.POST.get("view_target"))
+    _, variables, _, _ = ops.sync_state(env, view_target)
     return render(
         request,
         "vars/_variable_rows.html",
-        {"env": env, "variables": env.active_vars(), "user": request.appuser},
+        {"env": env, "variables": variables, "user": request.appuser,
+         "view_target": view_target},
     )
 
 
@@ -439,98 +539,9 @@ def cleanup_archive(request, var_id):
 
 @login_required
 def checks(request):
-    """Per-target drift status: latest check, in-sync/drift, and staleness."""
-    from .models import DriftCheck
-    latest, previous = {}, {}
-    for c in DriftCheck.objects.select_related("environment"):  # ordered -checked_at
-        key = (c.environment_id, c.target_label)
-        if key not in latest:
-            latest[key] = c
-        elif key not in previous:
-            previous[key] = c  # the run before the latest, for managed-key change diff
-    now = timezone.now()
-    stale_after = timezone.timedelta(days=2)
-    rows = []
-    for env in _nav_environments():
-        for t in env.targets.all():
-            c = latest.get((env.id, t.label))
-            p = previous.get((env.id, t.label))
-            managed_added, managed_gone = [], []
-            if c and p:
-                managed_added = sorted(set(c.dokku_managed) - set(p.dokku_managed))
-                managed_gone = sorted(set(p.dokku_managed) - set(c.dokku_managed))
-            rows.append({
-                "env": env, "target": t, "check": c,
-                "stale": c is None or (now - c.checked_at) > stale_after,
-                "never": c is None,
-                "managed_added": managed_added, "managed_gone": managed_gone,
-            })
-    return render(
-        request,
-        "vars/checks.html",
-        {"environments": _nav_environments(), "rows": rows, "user": request.appuser},
-    )
-
-
-@require_POST
-@login_required
-def checks_run(request):
-    """On-demand drift check for one environment (optionally one target). Runs the
-    same comparison as the scheduled cron, synchronously, and records DriftCheck
-    rows so the Checks page reflects reality right now.
-
-    Bounded by a wall-clock budget because it SSHes to each box in-request and the
-    web worker has a finite timeout; any targets not reached are reported so the
-    user can re-run. SSH failures (e.g. the drift key isn't registered on a host)
-    surface as visible errors instead of a silent 'never'."""
-    import os
-    import subprocess
-    import time
-
-    from . import drift
-
-    slug = request.POST.get("env")
-    target_label = (request.POST.get("target") or "").strip() or None
-    env = get_object_or_404(Environment, slug=slug)
-
-    targets = [t for t in env.targets.all() if t.host and t.dokku_app]
-    if target_label:
-        targets = [t for t in targets if t.label == target_label]
-
-    if not targets:
-        messages.info(request, f"{env.name}: no checkable targets (need a host + Dokku app).")
-        return redirect("checks")
-
-    # Fail fast on unreachable hosts, and cap total work so the request can't hang
-    # the worker (gunicorn default timeout is 30s).
-    ssh_base, tmp = drift.build_ssh_base(connect_timeout=8)
-    budget_s = 22.0
-    start = time.monotonic()
-    actor = f"drift-ui:{getattr(request.appuser, 'username', '') or 'user'}"
-    checked, errors, not_reached = 0, [], 0
-    try:
-        for t in targets:
-            if time.monotonic() - start > budget_s:
-                not_reached = len(targets) - checked - len(errors)
-                break
-            try:
-                drift.check_one(env, t, ssh_base, actor=actor)
-                checked += 1
-            except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
-                # OSError covers a missing ssh binary (FileNotFoundError); any check
-                # failure must surface as a message, never a 500 for the whole page.
-                errors.append(f"{t.label}: {str(exc)[:200]}")
-    finally:
-        if tmp:
-            os.unlink(tmp)
-
-    if checked:
-        messages.success(request, f"{env.name}: checked {checked} target(s).")
-    for e in errors:
-        messages.error(request, f"{env.name} — {e}")
-    if not_reached:
-        messages.info(request, f"{env.name}: {not_reached} target(s) not reached (time budget) — run again to finish.")
-    return redirect("checks")
+    """The fleet-wide Checks page is gone: a check belongs to the environment it
+    checks, so it runs from that environment's page. Old links land on home."""
+    return redirect("home")
 
 
 # --- audit ----------------------------------------------------------------

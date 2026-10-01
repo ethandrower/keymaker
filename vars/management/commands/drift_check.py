@@ -3,11 +3,11 @@
 Walks every active environment's targets, SSHes to each target's Dokku host to read
 its LIVE config, and compares against what Keymaker holds (resolved for that
 target). Differences are recorded as DriftCheck rows (key NAMES only, never
-values) so the Checks page can show new keys set directly on boxes, missing keys,
+values) so each environment page can show new keys set directly on boxes, missing keys,
 and value drift — plus prove the check ran.
 
 The per-target comparison lives in vars/drift.py and is shared with the on-demand
-"Check now" buttons on the Checks page, so the scheduled and manual paths never
+"Check" buttons on the environment pages, so the scheduled and manual paths never
 diverge.
 
 SSH: set config var KEYMAKER_SSH_KEY_B64 (base64 of a private key authorized as a

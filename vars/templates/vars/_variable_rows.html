@@ -1,10 +1,11 @@
 {% comment %}<tbody> of the variables table: grouped by label, with Status + Scope columns.
-Swapped in by HTMX after edits. `variables` is ordered server-side by
-(is_server_only, label, key) so each label forms one contiguous {% regroup %} group.
+Swapped in by HTMX after edits, so the view must re-annotate sync status before
+rendering this — a status column that silently blanks after a save would be worse
+than no status column at all.
 
-Rows are either real Variables or sync.ServerOnlyRow pseudo-rows (keys found on a box
-but absent from Keymaker) — the latter have no id, so every id-based URL is guarded.{% endcomment %}
-{% load sync_tags %}
+`variables` is ordered by (label, key) so each label forms one contiguous
+{% regroup %} group. Keys that exist only on a box are NOT here — they have no
+value to show and live in the adoption panel above the table.{% endcomment %}
 <tbody id="var-rows">
   {% regroup variables by label as grouped %}
   {% for grp in grouped %}
@@ -19,8 +20,7 @@ but absent from Keymaker) — the latter have no id, so every id-based URL is gu
       </tr>
     {% endif %}
     {% for v in grp.list %}
-      <tr {% if not v.is_server_only %}x-data="{ revealed: false, value: '' }"{% endif %}
-          {% if v.is_server_only %}class="server-only-row"{% endif %}
+      <tr x-data="{ revealed: false, value: '' }"
           x-show="matchRow('{{ v.key|escapejs }}', '{{ v.status_tokens }}') && (q !== '' || stf !== '' || !rowCollapsed('{{ gid|escapejs }}'))">
         <td class="key">
           {{ v.key }}
@@ -29,9 +29,7 @@ but absent from Keymaker) — the latter have no id, so every id-based URL is gu
           {% if v.suspected_unused %}<span class="badge unused" title="{{ v.audit_note }} — last seen {{ v.last_seen_at|default:'never' }}">⚠ unused?</span>{% endif %}
         </td>
         <td class="value">
-          {% if v.is_server_only %}
-            <span class="muted small" title="Drift checks record key names only, never values — Keymaker has no copy of this one.">value only on the box</span>
-          {% elif v.is_secret %}
+          {% if v.is_secret %}
             <span x-show="!revealed" class="masked">••••••••</span>
             <code x-show="revealed" x-text="value" class="revealed-value"></code>
             <button class="icon-btn"
@@ -47,36 +45,46 @@ but absent from Keymaker) — the latter have no id, so every id-based URL is gu
                     title="Copy">📋</button>
           {% endif %}
         </td>
+        {# Status per box, plus the button that fixes it when we hold the value. #}
         <td class="status">
           {% if v.is_managed %}
             <span class="muted small" title="Dokku owns this key — Keymaker never sets or compares it">— managed</span>
           {% elif not v.sync %}
             <span class="muted small" title="No box in this environment receives this variable">—</span>
-          {% elif v.sync|length == 1 %}
-            {% for label, s in v.sync %}
-              <span class="sync-dot {{ s }}" title="{{ label }}: {{ s|sync_label }}">{{ s|sync_glyph }}</span>
-              <span class="muted small">{{ s|sync_label }}</span>
-            {% endfor %}
           {% else %}
-            <span class="dot-row">
-              {% for label, s in v.sync %}<span class="sync-dot {{ s }}" title="{{ label }}: {{ s|sync_label }}">{{ s|sync_glyph }}</span>{% endfor %}
-            </span>
-            <span class="muted small{% if v.synced_n < v.total_n %} attention{% endif %}">{{ v.synced_n }}/{{ v.total_n }}</span>
+            {% if v.sync|length == 1 %}
+              {% for b in v.sync %}
+                <span class="sync-dot {{ b.status }}" title="{{ b.tooltip }}">{{ b.glyph }}</span>
+                <span class="muted small" title="{{ b.tooltip }}">{{ b.text }}</span>
+              {% endfor %}
+            {% else %}
+              <span class="dot-row">
+                {% for b in v.sync %}<span class="sync-dot {{ b.status }}" title="{{ b.tooltip }}">{{ b.glyph }}</span>{% endfor %}
+              </span>
+              <span class="muted small{% if v.synced_n < v.total_n %} attention{% endif %}"
+                    title="{% for b in v.sync %}{{ b.tooltip }}&#10;{% endfor %}">{{ v.synced_n }}/{{ v.total_n }}</span>
+            {% endif %}
+            {% if user.is_admin and v.pushable %}
+              <form method="post" action="{% url 'variables_push' env.slug %}" style="display:inline"
+                    onsubmit="return confirm('Send Keymaker’s value for {{ v.key|escapejs }} to {% for b in v.pushable %}{{ b.label|escapejs }}{% if not forloop.last %}, {% endif %}{% endfor %}?\n\nSets it with --no-restart; the app picks it up on its next restart or deploy.')">
+                {% csrf_token %}
+                <input type="hidden" name="key" value="{{ v.key }}">
+                <input type="hidden" name="view_target" value="{{ view_target.id|default_if_none:'' }}">
+                <button class="btn small push-btn" type="submit"
+                        title="Send to {% for b in v.pushable %}{{ b.label }}{% if not forloop.last %}, {% endif %}{% endfor %} (dokku config:set --no-restart)">
+                  send →{% if v.pushable|length > 1 %} <span class="muted">{{ v.pushable|length }}</span>{% endif %}
+                </button>
+              </form>
+            {% endif %}
           {% endif %}
         </td>
         <td class="scope">
-          {% if v.is_server_only %}
-            <span class="badge server-only">unadopted</span>
-          {% elif v.target_id %}<span class="badge target">{{ v.target.label }}</span>
+          {% if v.target_id %}<span class="badge target">{{ v.target.label }}</span>
           {% else %}<span class="muted small">all targets</span>{% endif %}
         </td>
         {% if user.is_admin %}
           <td class="actions">
-            {% if v.is_server_only %}
-              <button class="btn small primary"
-                      title="Add this key to Keymaker — paste the value from the box"
-                      @click="$dispatch('edit-var', {id: '', key: '{{ v.key|escapejs }}', is_secret: true, target: '{{ v.adopt_target_id }}', label: '' })">Adopt</button>
-            {% elif not v.is_managed %}
+            {% if not v.is_managed %}
               <button class="btn small"
                       @click="$dispatch('edit-var', {id: {{ v.id }}, key: '{{ v.key|escapejs }}', is_secret: {{ v.is_secret|yesno:'true,false' }}, target: '{{ v.target_id|default_if_none:'' }}', label: '{{ v.label|escapejs }}' })">Edit</button>
               <form method="post" action="{% url 'variable_archive' env.slug v.id %}" style="display:inline"

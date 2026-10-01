@@ -5,3 +5,6 @@ db.sqlite3
 staticfiles/
 .keymaker-sync-*.json
 .DS_Store
+
+# Simulated Dokku boxes for local drift/sync development (never committed)
+.simboxes/

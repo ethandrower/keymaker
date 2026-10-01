@@ -232,18 +232,33 @@ process, just one more route in the same Django app behind the same bearer key.
 
 Tools exposed (discoverable via `tools/list`):
 
-| Tool | Does |
-| --- | --- |
-| `keymaker_inventory` | Whole-fleet snapshot — envs, servers, revisions, var counts, drift. **No values.** Start here. |
-| `keymaker_list_environments` | Lighter env list (slug, name, revision). |
-| `keymaker_get_variables` | Resolved key/values for an env (optional `target`, `include_managed`). |
-| `keymaker_check_revision` | Current revision — cheap change check. |
-| `keymaker_set_variable` | Upsert a key (optional `target`, `label`). Bumps revision. |
-| `keymaker_archive_variable` | Soft-delete a key (restorable in the UI). Bumps revision. |
+| Tool | Does | Touches a server? |
+| --- | --- | --- |
+| `keymaker_inventory` | Whole-fleet snapshot: envs, servers, revisions, var counts, latest drift. No values. **Start here.** | no |
+| `keymaker_list_environments` | Lighter env list (slug, name, revision). | no |
+| `keymaker_find_key` | Which environments and scopes hold a key, by full or partial name. No values. | no |
+| `keymaker_get_variables` | Resolved key/values for an env (optional `target`, `keys`, `include_managed`). | no |
+| `keymaker_check_revision` | Current revision — cheap change check. | no |
+| `keymaker_sync_status` | How an env compares to its servers, from the latest checks. Names only. | no |
+| `keymaker_check_drift` | Run a drift check now and return the fresh status. | reads |
+| `keymaker_set_variable` | Upsert a key (optional `target`, `label`). `push: true` also sends it to the server(s). | only with `push` |
+| `keymaker_archive_variable` | Soft-delete a key (restorable in the UI). Does not remove it from servers. | no |
+| `keymaker_push_variables` | Send Keymaker's values to servers that lack them or differ (`keys`, or `all: true`). | writes, `--no-restart` |
+| `keymaker_adopt_variables` | Pull keys that exist only on a server into Keymaker, reading their live values. | reads |
+| `keymaker_ignore_keys` | Stop reporting keys Keymaker shouldn't manage (e.g. `APP_VERSION`). | no |
+| `keymaker_create_environment` | Create an environment (idempotent by slug). | no |
+| `keymaker_save_target` | Register or update a server in an environment (matched by label). | no |
 
-The MCP tools wrap the same logic as the REST API, so behavior never diverges:
-managed keys (`DATABASE_URL`/`REDIS_URL`) are read-only, `archive` never destroys,
-and the inventory tool returns key *names* and counts only — never secret values.
+**Keymaker's record and a server's live config are two separate things.** Setting a
+variable changes the record only. Nothing copies it to a server until you push —
+`keymaker_push_variables`, `push: true` on set, or **send →** in the UI. Pushes use
+`dokku config:set --no-restart`: the value is on the server immediately and the app
+picks it up on its next restart or deploy.
+
+The MCP tools and the web UI call the same functions (`vars/ops.py`), so behaviour
+never diverges: managed keys (`DATABASE_URL`/`REDIS_URL`) are read-only, `archive`
+never destroys, only keys a check flagged can be bulk-pushed, and status and
+inventory return key *names* only — never secret values.
 
 Two CLIs in `client/` (stdlib-only, run with `python3`, each has `--help`); both
 read `KEYMAKER_KEY` from the environment:
@@ -255,18 +270,34 @@ read `KEYMAKER_KEY` from the environment:
 Agent rules of thumb: `DELETE` archives (recoverable), it never destroys;
 `revision` is a cheap change check before doing expensive work.
 
-## Dokku sync client
+## Dokku sync client (optional, not deployed)
 
-See [`client/README.md`](client/README.md). It runs on each Dokku host, polls
-`/revision`, and applies changes via `dokku config:set` — never touching
-`DATABASE_URL`/`REDIS_URL`.
+[`client/dokku_sync.py`](client/README.md) is a pull-based alternative: installed on
+a Dokku host, it polls `/revision` and applies changes itself. **It is not running
+on any host today** — values reach servers by an explicit push from Keymaker (above).
+Unlike a push, the client also *unsets* keys Keymaker lacks, so adopt or ignore a
+server's own keys before ever turning it on.
 
 ## Drift detection
 
 A scheduled job compares each target's **live** Dokku config against what Keymaker
 holds and records the differences as `DriftCheck` rows (key **names** only, never
-values) — surfacing keys set directly on a box, missing keys, and value drift on
-the **Checks** page and per-key liveness badges.
+values). Every environment page then shows, per key, how it compares to each box
+it belongs on — in sync, value differs, in Keymaker but not on the box, on the box
+but not in Keymaker, or **not checked** (no check in 48h; never rendered as green).
+
+Three actions close the loop, all from the environment page (there is no separate
+Checks page — **Check** sits on each target and on the environment):
+
+| Situation | Action | What it does |
+|---|---|---|
+| On the box, not in Keymaker | **Store in Keymaker** (selected, or all at once) | Reads the live value off the box and stores it (checks carry names only, so this is the one path that fetches a value from a server) |
+| On the box, and we don't want it | **Ignore** | Records a reversible decision so deploy-injected keys stop being reported |
+| In Keymaker, box missing it or disagreeing | **send →** per key, or **Send all** | `dokku config:set --no-restart` — the value lands now, the app picks it up on its next restart or deploy |
+
+Adopt and push re-run the check on the box they touched, so the status you land
+back on is measured rather than assumed. Only keys a check actually flagged can
+be pushed, so this can't be used to blanket-overwrite a box.
 
 - **Schedule** — defined in [`app.json`](app.json)'s `cron` block (daily 07:00
   UTC), applied automatically by Dokku on deploy. No host crontab to maintain.
@@ -277,6 +308,16 @@ the **Checks** page and per-key liveness badges.
   app, and run [`client/setup-drift.sh`](client/setup-drift.sh) **once** to
   register the matching public key on the hosts. Without this, drift checks
   record an error instead of data.
+- **Working on this locally** — `KEYMAKER_SIM_BOX_DIR` (set for you in
+  `docker-compose.yml`) points drift at a directory of `<host>__<app>.json` files
+  instead of SSH, so the whole check → adopt → push loop works with no real hosts:
+
+  ```bash
+  docker compose exec web python manage.py seed_sim_boxes   # fake boxes with planted drift
+  docker compose exec web python manage.py drift_check
+  ```
+
+  Production must never set this variable; `sim_dir()` is off unless it's present.
 
 ## Deploying on Dokku
 

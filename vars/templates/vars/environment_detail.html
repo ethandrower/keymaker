@@ -8,37 +8,37 @@
     {% if env.archived %}<p class="msg error" style="display:inline-block">Archived by {{ env.archived_by }} on {{ env.archived_at|date:"Y-m-d" }} — hidden from the sidebar; restore to use it again.</p>{% endif %}
     {% if env.description %}<p class="muted">{{ env.description }}</p>{% endif %}
   </div>
-  <div class="env-meta" x-data="{ managed: false, dlTarget: '' }">
-    {% if user.is_admin %}
-      {% if env.archived %}
-        <form method="post" action="{% url 'environment_restore' env.slug %}" style="display:inline">
-          {% csrf_token %}<button class="btn small primary">↩ Restore env</button>
-        </form>
-      {% else %}
-        <form method="post" action="{% url 'environment_archive' env.slug %}" style="display:inline"
-              onsubmit="return confirm('Archive {{ env.name|escapejs }}? It hides from the sidebar but stays restorable.')">
-          {% csrf_token %}<button class="btn small">Archive env</button>
-        </form>
-        <form method="post" action="{% url 'environment_delete' env.slug %}" style="display:inline"
-              onsubmit="return confirm('PERMANENTLY delete {{ env.name|escapejs }} and all {{ env.variables.count }} variable(s) + {{ env.targets.count }} target(s)? This cannot be undone.')">
-          {% csrf_token %}<button class="btn small danger">Delete env</button>
-        </form>
-      {% endif %}
-    {% endif %}
-    <span class="pill">rev {{ env.revision }}</span>
-    <span class="pill">{{ env.get_kind_display }}</span>
-    {% if targets %}
-      <select x-model="dlTarget" class="small" title="Resolve .env for a specific target">
-        <option value="">all-targets only</option>
-        {% for t in targets %}<option value="{{ t.id }}">resolved for {{ t.label }}</option>{% endfor %}
-      </select>
-    {% endif %}
-    <a class="btn small primary"
-       :href="'{% url 'environment_download' env.slug %}?' + (dlTarget ? 'target='+dlTarget+'&' : '') + (managed ? 'include_managed=1' : '')"
-       title="Download this environment as a .env file">⬇ Download .env</a>
-    <label class="chk small" title="Include externally-managed keys (DATABASE_URL, REDIS_URL)">
-      <input type="checkbox" x-model="managed"> incl. managed
-    </label>
+  <div class="env-meta">
+    <span class="muted small">rev {{ env.revision }} · {{ env.get_kind_display }}</span>
+    {# One menu for the whole environment; Download follows the target filter below. #}
+    <div class="menu" x-data="{ open: false }" @click.outside="open = false" @keydown.escape.window="open = false">
+      <button type="button" class="btn small" @click="open = !open" :aria-expanded="open">Actions ▾</button>
+      <div class="menu-items" x-show="open" x-cloak>
+        <a href="{% url 'environment_download' env.slug %}{% if view_target %}?target={{ view_target.id }}{% endif %}">
+          ⬇ Download .env
+          <span class="muted small">{% if view_target %}resolved for {{ view_target.label }}{% else %}all-targets values{% endif %}</span></a>
+        <a href="{% url 'environment_download' env.slug %}?include_managed=1{% if view_target %}&target={{ view_target.id }}{% endif %}">
+          ⬇ Download .env with managed keys
+          <span class="muted small">adds DATABASE_URL, REDIS_URL</span></a>
+        {% if user.is_admin %}
+          <hr>
+          {% if env.archived %}
+            <form method="post" action="{% url 'environment_restore' env.slug %}">
+              {% csrf_token %}<button type="submit">↩ Restore environment</button>
+            </form>
+          {% else %}
+            <form method="post" action="{% url 'environment_archive' env.slug %}"
+                  onsubmit="return confirm('Archive {{ env.name|escapejs }}? It hides from the sidebar but stays restorable.')">
+              {% csrf_token %}<button type="submit">Archive environment <span class="muted small">hidden, restorable</span></button>
+            </form>
+          {% endif %}
+          <form method="post" action="{% url 'environment_delete' env.slug %}"
+                onsubmit="return confirm('PERMANENTLY delete {{ env.name|escapejs }} and all {{ env.variables.count }} variable(s) + {{ env.targets.count }} target(s)? This cannot be undone.')">
+            {% csrf_token %}<button type="submit" class="danger">Delete environment <span class="muted small">permanent</span></button>
+          </form>
+        {% endif %}
+      </div>
+    </div>
   </div>
 </div>
 
@@ -47,9 +47,17 @@
          @edit-target.window="topen=true; t={...$event.detail}">
   <div class="section-bar">
     <h3>Targets <span class="muted small">where this env runs</span></h3>
-    {% if user.is_admin %}
-      <button class="btn primary small" @click="topen=true; t={id:'',label:'',host:'',dokku_app:'',domain:'',local_only:false}">+ Add target</button>
-    {% endif %}
+    <div style="display:flex; gap:8px; align-items:center">
+      {% if summary.targets_total %}
+        <form method="post" action="{% url 'environment_check' env.slug %}" style="display:inline">
+          {% csrf_token %}
+          <button class="btn small" type="submit" title="Compare every box in this environment to Keymaker now">Check all</button>
+        </form>
+      {% endif %}
+      {% if user.is_admin %}
+        <button class="btn primary small" @click="topen=true; t={id:'',label:'',host:'',dokku_app:'',domain:'',local_only:false}">+ Add target</button>
+      {% endif %}
+    </div>
   </div>
 
   {% if user.is_admin %}
@@ -69,16 +77,36 @@
   {% endif %}
 
   <table class="mini">
-    <thead><tr><th>Label</th><th>Host / IP</th><th>Dokku app</th><th>Domain</th>{% if user.is_admin %}<th></th>{% endif %}</tr></thead>
+    <thead><tr><th>Label</th><th>Host / IP</th><th>Dokku app</th><th>Domain</th><th>Compared to Keymaker</th><th></th></tr></thead>
     <tbody>
-      {% for t in env.targets.all %}
-        <tr>
-          <td>{{ t.label }}{% if t.local_only %} <span class="badge">local</span>{% endif %}</td>
+      {% for r in target_rows %}
+        {% with t=r.target c=r.check %}
+        <tr {% if view_target and view_target.id == t.id %}class="selected"{% endif %}>
+          <td><a href="{% url 'environment_detail' env.slug %}?target={{ t.id }}" title="Show only this target's variables">{{ t.label }}</a>{% if t.local_only %} <span class="badge">local</span>{% endif %}</td>
           <td>{{ t.host|default:"—" }}</td>
           <td><code>{{ t.dokku_app|default:"—" }}</code></td>
           <td>{{ t.domain|default:"—" }}</td>
-          {% if user.is_admin %}
-            <td class="actions">
+          <td class="small">
+            {% if r.state == "uncheckable" %}<span class="muted" title="Needs a host and a Dokku app to be compared">not comparable</span>
+            {% elif r.state == "never" %}<span class="badge state-unknown">never checked</span>
+            {% else %}
+              {% if r.state == "stale" %}<span class="badge state-unknown" title="Older than {{ stale_after_hours }}h — not trusted">stale</span>
+              {% elif r.state == "in_sync" %}<span class="badge state-ok">in sync</span>
+              {% else %}<span class="badge state-drift"
+                    title="{% if c.on_box_only %}On box only: {{ c.on_box_only|join:', ' }}&#10;{% endif %}{% if c.in_keymaker_only %}Missing on box: {{ c.in_keymaker_only|join:', ' }}&#10;{% endif %}{% if c.value_mismatch %}Value differs: {{ c.value_mismatch|join:', ' }}{% endif %}">{{ c.drift_count }} out of step</span>{% endif %}
+              <span class="muted" title="{{ c.checked_at|date:'Y-m-d H:i' }} UTC{% if c.dokku_managed %}&#10;Dokku-managed on box (never synced): {{ c.dokku_managed|join:', ' }}{% endif %}">{{ c.checked_at|timesince }} ago</span>
+            {% endif %}
+          </td>
+          <td class="actions">
+            {% if r.checkable %}
+              <form method="post" action="{% url 'environment_check' env.slug %}" style="display:inline">
+                {% csrf_token %}
+                <input type="hidden" name="target" value="{{ t.id }}">
+                <input type="hidden" name="view_target" value="{{ view_target.id|default_if_none:'' }}">
+                <button class="btn small" type="submit" title="Compare {{ t.label }}'s live config to Keymaker now">Check</button>
+              </form>
+            {% endif %}
+            {% if user.is_admin %}
               <button class="btn small"
                       @click="$dispatch('edit-target', {id:{{ t.id }}, label:'{{ t.label|escapejs }}', host:'{{ t.host|escapejs }}', dokku_app:'{{ t.dokku_app|escapejs }}', domain:'{{ t.domain|escapejs }}', local_only:{{ t.local_only|yesno:'true,false' }} })">Edit</button>
               <form method="post" action="{% url 'target_delete' env.slug t.id %}" style="display:inline"
@@ -86,11 +114,12 @@
                 {% csrf_token %}
                 <button class="btn small danger" type="submit">Delete</button>
               </form>
-            </td>
-          {% endif %}
+            {% endif %}
+          </td>
         </tr>
+        {% endwith %}
       {% empty %}
-        <tr><td colspan="{% if user.is_admin %}5{% else %}4{% endif %}" class="muted">No targets defined.</td></tr>
+        <tr><td colspan="6" class="muted">No targets defined.</td></tr>
       {% endfor %}
     </tbody>
   </table>
@@ -152,14 +181,14 @@
   {# Sync headline: what we can actually vouch for, and what we can't. #}
   <div class="sync-summary {% if summary.clean %}clean{% elif summary.targets_checked == 0 %}unknown{% else %}attention{% endif %}">
     {% if summary.targets_total == 0 %}
-      <span class="muted small">No remote targets — nothing to compare against.</span>
+      <span class="muted small">No Dokku targets here (each needs a host and a Dokku app) — nothing to compare against.</span>
     {% elif summary.targets_checked == 0 %}
       <strong>?</strong> Never checked — status below is unknown, not healthy.
       <span class="muted small">No drift check has run for
         {% if summary.targets_unchecked %}<code>{{ summary.targets_unchecked|join:"</code>, <code>" }}</code>{% endif %}.
-        <a href="{% url 'checks' %}">Run one →</a></span>
+        {% include "vars/_check_now.html" %}</span>
     {% else %}
-      {% if summary.clean %}<strong>●</strong> All {{ summary.synced }} values match the box{{ summary.targets_checked|pluralize }}.
+      {% if summary.clean %}<strong>●</strong> All {{ summary.synced }} values match the box{{ summary.targets_checked|pluralize:"es" }}.
       {% else %}<strong>⚠</strong> Needs attention:
         {% if summary.drifted %}<span class="chip drifted">{{ summary.drifted }} value{{ summary.drifted|pluralize }} differ{{ summary.drifted|pluralize:"s," }}</span>{% endif %}
         {% if summary.keymaker_only %}<span class="chip keymaker_only">{{ summary.keymaker_only }} not on box</span>{% endif %}
@@ -169,7 +198,17 @@
       <span class="muted small">· {{ summary.targets_checked }}/{{ summary.targets_total }} target{{ summary.targets_total|pluralize }} checked,
         last {{ summary.last_checked_at|timesince }} ago
         {% if summary.targets_unchecked %}· stale or never checked: <code>{{ summary.targets_unchecked|join:"</code>, <code>" }}</code>{% endif %}
-        · <a href="{% url 'checks' %}">check now →</a></span>
+        · {% include "vars/_check_now.html" %}</span>
+      {% if user.is_admin and pushable_n %}
+        <form method="post" action="{% url 'variables_push' env.slug %}" style="display:inline; float:right"
+              onsubmit="return confirm('Send {{ pushable_n }} value(s) from Keymaker to {% if view_target %}{{ view_target.label|escapejs }}{% else %}every box that is missing or differs{% endif %}?\n\nSet with --no-restart; each app picks them up on its next restart or deploy.')">
+          {% csrf_token %}
+          <input type="hidden" name="all" value="1">
+          <input type="hidden" name="view_target" value="{{ view_target.id|default_if_none:'' }}">
+          {% if view_target %}<input type="hidden" name="target" value="{{ view_target.id }}">{% endif %}
+          <button class="btn small primary" type="submit">Send all {{ pushable_n }} to {% if view_target %}{{ view_target.label }}{% else %}the boxes{% endif %} →</button>
+        </form>
+      {% endif %}
     {% endif %}
   </div>
   <p class="muted small sync-legend">
@@ -180,11 +219,15 @@
     <span class="sync-dot unknown">?</span> not checked in {{ stale_after_hours }}h
   </p>
 
+  {# Keys the boxes have and we don't — triaged above the table, not buried in it. #}
+  {% include "vars/_adoption_panel.html" %}
+
   {% if user.is_admin %}
     <div class="var-editor" x-show="open" x-cloak>
       <form hx-post="{% url 'variable_save' env.slug %}" hx-target="#var-rows" hx-swap="outerHTML"
             @htmx:after-request="if($event.detail.successful){ open=false }">
         <input type="hidden" name="id" :value="form.id">
+        <input type="hidden" name="view_target" value="{{ view_target.id|default_if_none:'' }}">
         <input name="key" placeholder="KEY" x-model="form.key" :readonly="!!form.id" required>
         <input name="value" placeholder="value" x-model="form.value"
                :placeholder="form.id ? 'new value (leave blank to keep)' : 'value'">

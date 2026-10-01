@@ -1,0 +1,9 @@
+{% comment %}Run the drift check for this environment in place. Honours the target
+filter: viewing one box checks that box, viewing all checks all of them.{% endcomment %}
+<form method="post" action="{% url 'environment_check' env.slug %}" style="display:inline">
+  {% csrf_token %}
+  <input type="hidden" name="view_target" value="{{ view_target.id|default_if_none:'' }}">
+  {% if view_target %}<input type="hidden" name="target" value="{{ view_target.id }}">{% endif %}
+  <button type="submit" class="btn-inline"
+          title="SSH to {% if view_target %}{{ view_target.label }}{% else %}each box{% endif %} and compare its live config to Keymaker right now">check now →</button>
+</form>
