@@ -654,8 +654,10 @@ class DriftConfigParsingTests(TestCase):
     STATICFILES_STORAGE="django.contrib.staticfiles.storage.StaticFilesStorage",
 )
 class OnDemandCheckTests(TestCase):
-    """The Checks-page 'Check now' / 'Check all' buttons → checks_run view. Runs the
-    SAME comparison as the cron (vars.drift), synchronously; SSH is mocked."""
+    """'Check' / 'Check all' on the environment page → environment_check view. Runs
+    the SAME comparison as the cron (vars.drift), synchronously; SSH is mocked."""
+
+    URL = "/environments/staging/sync/check"
 
     MOD = "vars.drift"
 
@@ -670,7 +672,7 @@ class OnDemandCheckTests(TestCase):
         self.assertEqual(self.client.post("/login", {"key": API_KEY}).status_code, 302)
 
     def test_requires_login(self):
-        resp = self.client.post("/checks/run", {"env": "staging", "target": "boxA"})
+        resp = self.client.post(self.URL, {"target": "boxA"})
         self.assertEqual(resp.status_code, 302)
         self.assertIn("/login", resp["Location"])
         self.assertFalse(DriftCheck.objects.exists())
@@ -678,9 +680,9 @@ class OnDemandCheckTests(TestCase):
     def test_check_now_records_a_row_and_redirects(self):
         self._login()
         with mock.patch(f"{self.MOD}.dokku_config", return_value={"SECRET_KEY": "km"}):
-            resp = self.client.post("/checks/run", {"env": "staging", "target": "boxA"})
+            resp = self.client.post(self.URL, {"target": "boxA"})
         self.assertEqual(resp.status_code, 302)
-        self.assertIn("/checks", resp["Location"])
+        self.assertEqual(resp["Location"], "/environments/staging/")   # back where you were
         dc = DriftCheck.objects.get(environment=self.env, target_label="boxA")
         self.assertTrue(dc.in_sync)
 
@@ -688,7 +690,7 @@ class OnDemandCheckTests(TestCase):
         self._login()
         Target.objects.create(environment=self.env, label="boxB", dokku_app="app-b", host="5.6.7.8")
         with mock.patch(f"{self.MOD}.dokku_config", return_value={"SECRET_KEY": "km"}) as m:
-            self.client.post("/checks/run", {"env": "staging", "target": "boxA"})
+            self.client.post(self.URL, {"target": "boxA"})
         self.assertEqual(m.call_count, 1)
         self.assertTrue(DriftCheck.objects.filter(target_label="boxA").exists())
         self.assertFalse(DriftCheck.objects.filter(target_label="boxB").exists())
@@ -697,7 +699,7 @@ class OnDemandCheckTests(TestCase):
         self._login()
         Target.objects.create(environment=self.env, label="boxB", dokku_app="app-b", host="5.6.7.8")
         with mock.patch(f"{self.MOD}.dokku_config", return_value={"SECRET_KEY": "km"}) as m:
-            self.client.post("/checks/run", {"env": "staging"})
+            self.client.post(self.URL)
         self.assertEqual(m.call_count, 2)
         self.assertEqual(DriftCheck.objects.count(), 2)
 
@@ -705,7 +707,7 @@ class OnDemandCheckTests(TestCase):
         self._login()
         with mock.patch(f"{self.MOD}.dokku_config",
                         side_effect=RuntimeError("Permission denied (publickey)")):
-            resp = self.client.post("/checks/run", {"env": "staging", "target": "boxA"}, follow=True)
+            resp = self.client.post(self.URL, {"target": "boxA"}, follow=True)
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(DriftCheck.objects.exists())
         self.assertContains(resp, "Permission denied")  # visible, not a silent 'never'
@@ -716,7 +718,7 @@ class OnDemandCheckTests(TestCase):
         self._login()
         with mock.patch(f"{self.MOD}.dokku_config",
                         side_effect=FileNotFoundError(2, "No such file or directory", "ssh")):
-            resp = self.client.post("/checks/run", {"env": "staging", "target": "boxA"}, follow=True)
+            resp = self.client.post(self.URL, {"target": "boxA"}, follow=True)
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(DriftCheck.objects.exists())
 
@@ -725,7 +727,7 @@ class OnDemandCheckTests(TestCase):
         env2 = Environment.objects.create(slug="localdev", name="Local")
         Target.objects.create(environment=env2, label="local", local_only=True)
         with mock.patch(f"{self.MOD}.dokku_config") as m:
-            self.client.post("/checks/run", {"env": "localdev"}, follow=True)
+            self.client.post("/environments/localdev/sync/check", follow=True)
         m.assert_not_called()
         self.assertFalse(DriftCheck.objects.exists())
 
@@ -841,9 +843,23 @@ class UiTests(TestCase):
     def test_pages_render(self):
         self._login()
         for path in (f"/environments/{self.env.slug}/", "/compare/", "/cleanup/",
-                     "/checks/", "/audit/"):
+                     "/audit/"):
             resp = self.client.get(path)
             self.assertEqual(resp.status_code, 200, path)
+
+    def test_no_template_comment_leaks_into_a_page(self):
+        """Django's {# #} is single-line only; a multi-line one renders as text."""
+        self._login()
+        Target.objects.create(environment=self.env, label="box", host="1.2.3.4", dokku_app="a")
+        resp = self.client.get(f"/environments/{self.env.slug}/")
+        self.assertNotContains(resp, "{#")
+        self.assertNotContains(resp, "#}")
+
+    def test_there_is_no_separate_checks_page(self):
+        """Checks live on the environment they check; the old URL just goes home."""
+        self._login()
+        self.assertEqual(self.client.get("/checks/").status_code, 302)
+        self.assertNotContains(self.client.get(f"/environments/{self.env.slug}/"), 'href="/checks/"')
 
     def test_login_page_renders_for_anonymous(self):
         resp = self.client.get("/login")
@@ -1109,11 +1125,19 @@ class SyncStatusTests(TestCase):
     def setUp(self):
         crypto._fernet = None
         self.env = Environment.objects.create(slug="lab", name="Lab")
-        self.tA = Target.objects.create(environment=self.env, label="boxA", dokku_app="lab-a")
-        self.tB = Target.objects.create(environment=self.env, label="boxB", dokku_app="lab-b")
+        self.tA = Target.objects.create(environment=self.env, label="boxA",
+                                        host="10.0.0.1", dokku_app="lab-a")
+        self.tB = Target.objects.create(environment=self.env, label="boxB",
+                                        host="10.0.0.2", dokku_app="lab-b")
         for key in ("MATCHES", "DIFFERS", "NOT_ON_BOX"):
-            v = Variable(environment=self.env, key=key)
-            v.set_value("x"); v.save()
+            self._var(key)
+
+    def _var(self, key, value="x", **kw):
+        """A variable last edited long before any check in these tests."""
+        v = Variable(environment=self.env, key=key, **kw)
+        v.set_value(value); v.save()
+        Variable.objects.filter(pk=v.pk).update(updated_at=timezone.now() - timedelta(days=30))
+        return v
 
     def _check(self, target_label, *, mismatch=(), km_only=(), on_box=(), age_hours=1):
         return DriftCheck.objects.create(
@@ -1194,8 +1218,7 @@ class SyncStatusTests(TestCase):
 
     def test_adopted_key_leaves_the_adoption_panel(self):
         self._check("boxA", on_box=["STRAY_KEY"])
-        v = Variable(environment=self.env, key="STRAY_KEY", target=self.tA)
-        v.set_value("adopted"); v.save()
+        self._var("STRAY_KEY", "adopted", target=self.tA)
         self._login()
         resp = self.client.get(f"/environments/{self.env.slug}/")
         self.assertNotIn("STRAY_KEY", self._adoptions(resp))
@@ -1211,8 +1234,7 @@ class SyncStatusTests(TestCase):
         self.assertEqual(rows["DIFFERS"].total_n, 1)
 
     def test_override_only_checked_against_its_own_target(self):
-        override = Variable(environment=self.env, key="ONLY_A", target=self.tA)
-        override.set_value("a"); override.save()
+        self._var("ONLY_A", "a", target=self.tA)
         self._check("boxA")
         self._check("boxB", km_only=["ONLY_A"])   # boxB legitimately lacks it
         self._login()
@@ -1221,8 +1243,7 @@ class SyncStatusTests(TestCase):
         self.assertEqual(rows["ONLY_A"].status, sync.SYNCED)
 
     def test_managed_keys_are_outside_sync(self):
-        m = Variable(environment=self.env, key="DATABASE_URL", is_managed=True)
-        m.set_value("postgres://x"); m.save()
+        self._var("DATABASE_URL", "postgres://x", is_managed=True)
         self._check("boxA"); self._check("boxB")
         self._login()
         rows = self._rows(self.client.get(f"/environments/{self.env.slug}/"))
@@ -1247,6 +1268,30 @@ class SyncStatusTests(TestCase):
         self._check("boxA"); self._check("boxB")
         self._login()
         self.assertTrue(self.client.get(f"/environments/{self.env.slug}/").context["summary"]["clean"])
+
+    def test_edit_after_the_check_is_unverified_but_sendable(self):
+        """A check that predates an edit describes a value we no longer hold: it
+        must not stay green, and the new value must be offerable to the box."""
+        self._check("boxA"); self._check("boxB")
+        v = Variable.objects.get(environment=self.env, key="MATCHES")
+        v.set_value("newer"); v.save()                     # edited after both checks
+        self._login()
+        row = self._rows(self.client.get(f"/environments/{self.env.slug}/"))["MATCHES"]
+        self.assertEqual({b.status for b in row.sync}, {sync.UNKNOWN})
+        self.assertEqual(row.synced_n, 0)
+        self.assertEqual(len(row.pushable), 2)
+
+    def test_host_without_a_dokku_app_is_not_comparable(self):
+        """The scraper fleet has hosts but no Dokku app: nothing can check them, so
+        they must not sit in every rollup as a permanent 'unknown'."""
+        Target.objects.create(environment=self.env, label="scraper", host="10.9.9.9")
+        self._check("boxA"); self._check("boxB")
+        self._login()
+        resp = self.client.get(f"/environments/{self.env.slug}/")
+        self.assertEqual(self._rows(resp)["MATCHES"].total_n, 2)
+        self.assertTrue(resp.context["summary"]["clean"])
+        states = {r["target"].label: r["state"] for r in resp.context["target_rows"]}
+        self.assertEqual(states["scraper"], "uncheckable")
 
 
 @override_settings(KEYMAKER_MASTER_KEYS=[TEST_KEY], KEYMAKER_KEY=API_KEY,
@@ -1420,3 +1465,136 @@ class SyncActionTests(TestCase):
         resp = self.client.post(f"/environments/{self.env.slug}/variables/save",
                                 {"id": v.id, "key": "MATCHES", "value": "v2"})
         self.assertContains(resp, "sync-dot")
+
+
+@override_settings(KEYMAKER_MASTER_KEYS=[TEST_KEY], KEYMAKER_MANAGED_KEYS=["DATABASE_URL"],
+                   KEYMAKER_KEY=API_KEY)
+class McpOperationsTests(TestCase):
+    """The MCP must be able to do what the environment page can: an agent that can
+    only read, or that can set a value which never reaches a server, will route
+    around Keymaker with `dokku config:set` — which is exactly what happened."""
+
+    def setUp(self):
+        crypto._fernet = None
+        self.tmp = tempfile.mkdtemp()
+        self.env = Environment.objects.create(slug="lab", name="Lab")
+        self.tA = Target.objects.create(environment=self.env, label="boxA",
+                                        host="10.0.0.1", dokku_app="lab-a")
+        self.tB = Target.objects.create(environment=self.env, label="boxB",
+                                        host="10.0.0.2", dokku_app="lab-b")
+        self._box(self.tA, {}); self._box(self.tB, {})
+        patcher = mock.patch.dict(os.environ, {"KEYMAKER_SIM_BOX_DIR": self.tmp})
+        patcher.start(); self.addCleanup(patcher.stop)
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def _path(self, t):
+        return os.path.join(self.tmp, f"{t.host}__{t.dokku_app}.json")
+
+    def _box(self, t, cfg):
+        with open(self._path(t), "w") as fh:
+            json.dump(cfg, fh)
+
+    def _read(self, t):
+        with open(self._path(t)) as fh:
+            return json.load(fh)
+
+    def _rpc(self, method, params=None):
+        resp = self.client.post(
+            "/mcp", json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}),
+            content_type="application/json", HTTP_AUTHORIZATION=f"Bearer {API_KEY}")
+        return resp.json()["result"]
+
+    def _call(self, tool, /, **args):
+        r = self._rpc("tools/call", {"name": tool, "arguments": args})
+        return r.get("structuredContent"), r
+
+    def test_every_tool_declares_whether_it_reads_or_writes(self):
+        tools = self._rpc("tools/list")["tools"]
+        for t in tools:
+            self.assertIn("readOnlyHint", t["annotations"], t["name"])
+        read_only = {t["name"] for t in tools if t["annotations"]["readOnlyHint"]}
+        self.assertIn("keymaker_get_variables", read_only)
+        self.assertNotIn("keymaker_set_variable", read_only)
+        self.assertNotIn("keymaker_push_variables", read_only)
+
+    def test_instructions_tell_agents_they_may_write(self):
+        text = self._rpc("initialize")["instructions"]
+        self.assertIn("keymaker_set_variable", text)
+        self.assertIn("keymaker_push_variables", text)
+
+    def test_set_alone_changes_no_server_and_says_so(self):
+        data, _ = self._call("keymaker_set_variable", environment="lab", key="FOO", value="1")
+        self.assertIn("do not have it yet", data["on_boxes"])
+        self.assertNotIn("FOO", self._read(self.tA))
+
+    def test_set_with_push_lands_on_every_server_it_applies_to(self):
+        data, _ = self._call("keymaker_set_variable", environment="lab", key="FOO",
+                             value="1", push=True)
+        self.assertEqual(data["push"]["pushed"], {"boxA": ["FOO"], "boxB": ["FOO"]})
+        self.assertEqual(self._read(self.tA)["FOO"], "1")
+        self.assertEqual(self._read(self.tB)["FOO"], "1")
+
+    def test_set_with_push_for_one_target_leaves_the_others_alone(self):
+        self._call("keymaker_set_variable", environment="lab", key="FOO", value="b-only",
+                   target="boxB", push=True)
+        self.assertEqual(self._read(self.tB)["FOO"], "b-only")
+        self.assertNotIn("FOO", self._read(self.tA))
+
+    def test_check_then_adopt_all_then_status_is_clean(self):
+        self._box(self.tA, {"HAND_SET": "from-box"})
+        data, _ = self._call("keymaker_check_drift", environment="lab")
+        self.assertEqual(data["checked"], ["boxA", "boxB"])
+        self.assertEqual([a["key"] for a in data["status"]["on_box_not_in_keymaker"]], ["HAND_SET"])
+        data, _ = self._call("keymaker_adopt_variables", environment="lab", all=True)
+        self.assertEqual([a["key"] for a in data["adopted"]], ["HAND_SET"])
+        self.assertEqual(self.env.active_vars().get(key="HAND_SET").value, "from-box")
+        data, _ = self._call("keymaker_sync_status", environment="lab")
+        self.assertTrue(data["summary"]["clean"])
+
+    def test_push_all_sends_only_what_a_check_flagged(self):
+        for key in ("SAME", "MISSING"):
+            v = Variable(environment=self.env, key=key); v.set_value("v"); v.save()
+        self._box(self.tA, {"SAME": "v"}); self._box(self.tB, {"SAME": "v", "MISSING": "v"})
+        self._call("keymaker_check_drift", environment="lab")
+        data, _ = self._call("keymaker_push_variables", environment="lab", all=True)
+        self.assertEqual(data["pushed"], {"boxA": ["MISSING"]})
+
+    def test_status_never_carries_values(self):
+        v = Variable(environment=self.env, key="SECRET"); v.set_value("hunter2-value"); v.save()
+        self._box(self.tA, {"OTHER": "box-only-value"})
+        _, raw = self._call("keymaker_check_drift", environment="lab")
+        self.assertNotIn("hunter2-value", json.dumps(raw))
+        self.assertNotIn("box-only-value", json.dumps(raw))
+
+    def test_find_key_and_single_key_read(self):
+        v = Variable(environment=self.env, key="MAILGUN_KEY"); v.set_value("mg"); v.save()
+        data, raw = self._call("keymaker_find_key", key="mailgun")
+        self.assertEqual([(m["environment"], m["key"]) for m in data["matches"]], [("lab", "MAILGUN_KEY")])
+        self.assertNotIn('"mg"', json.dumps(raw))
+        data, _ = self._call("keymaker_get_variables", environment="lab", keys=["MAILGUN_KEY", "NOPE"])
+        self.assertEqual(data["variables"], {"MAILGUN_KEY": "mg"})
+        self.assertEqual(data["not_found"], ["NOPE"])
+
+    def test_an_agent_can_register_an_environment_and_its_server(self):
+        data, _ = self._call("keymaker_create_environment", name="Labs Staging")
+        self.assertEqual((data["slug"], data["created"]), ("labs-staging", True))
+        data, _ = self._call("keymaker_save_target", environment="labs-staging", label="labs",
+                             host="10.1.1.1", dokku_app="labs")
+        self.assertTrue(data["checkable"])
+        data, _ = self._call("keymaker_save_target", environment="labs-staging", label="labs",
+                             domain="labs.example.com")          # update keeps host/app
+        self.assertEqual((data["created"], data["host"], data["domain"]),
+                         (False, "10.1.1.1", "labs.example.com"))
+
+    def test_errors_name_the_valid_choices(self):
+        _, raw = self._call("keymaker_sync_status", environment="nope")
+        self.assertTrue(raw["isError"]); self.assertIn("lab", raw["content"][0]["text"])
+        _, raw = self._call("keymaker_push_variables", environment="lab", keys=["X"], target="zed")
+        self.assertTrue(raw["isError"]); self.assertIn("boxA", raw["content"][0]["text"])
+
+    def test_unreachable_server_is_reported_not_raised(self):
+        os.unlink(self._path(self.tB))
+        data, raw = self._call("keymaker_check_drift", environment="lab")
+        self.assertFalse(raw.get("isError"))
+        self.assertEqual(data["checked"], ["boxA"])
+        self.assertIn("boxB", data["errors"][0])

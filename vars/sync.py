@@ -42,6 +42,7 @@ LABELS = {
     SERVER_ONLY: "on the box, not in Keymaker",
     UNKNOWN: "not checked",
 }
+EDITED_SINCE = "changed in Keymaker since the last check"
 GLYPHS = {SYNCED: "●", DRIFTED: "◐", KEYMAKER_ONLY: "○", SERVER_ONLY: "◆", UNKNOWN: "?"}
 
 # Worst-first, so a row's headline status is its most alarming one.
@@ -56,11 +57,14 @@ PUSHABLE = (DRIFTED, KEYMAKER_ONLY)
 class BoxStatus:
     """One variable's state on one box, and the check that established it."""
 
-    def __init__(self, target, status, checked_at):
+    def __init__(self, target, status, checked_at, edited_since=False):
         self.label = target.label
         self.target_id = target.id
         self.status = status
         self.checked_at = checked_at  # None when never checked or stale
+        # The value changed in Keymaker after the box was last compared: the
+        # check's verdict describes a value we no longer hold.
+        self.edited_since = edited_since
 
     @property
     def glyph(self):
@@ -68,11 +72,13 @@ class BoxStatus:
 
     @property
     def text(self):
-        return LABELS[self.status]
+        return EDITED_SINCE if self.edited_since else LABELS[self.status]
 
     @property
     def pushable(self):
-        return self.status in PUSHABLE
+        # An edit made after the last check is exactly what a push is for: we
+        # hold a newer value, even though no check has measured the gap yet.
+        return self.status in PUSHABLE or self.edited_since
 
     @property
     def tooltip(self):
@@ -82,10 +88,12 @@ class BoxStatus:
 
 
 def checkable_targets(targets):
-    """Targets a drift check can actually reach. `local_only` boxes (localhost,
-    docker-compose) are never polled, so counting them would permanently
-    understate every environment."""
-    return [t for t in targets if not t.local_only]
+    """Targets a drift check can actually reach: a Dokku app on a named host.
+
+    `local_only` boxes (localhost, docker-compose) and hosts with no Dokku app
+    (the scraper fleet) are never polled, so counting them would permanently
+    understate every environment and leave their keys "unknown" forever."""
+    return [t for t in targets if not t.local_only and t.host and t.dokku_app]
 
 
 def latest_checks(env, targets):
@@ -141,8 +149,9 @@ def annotate(variables, targets, checks, view_target=None):
         boxes = []
         for t in _applicable(v, reachable, view_target):
             dc, fresh = checks.get(t.label, (None, False))
-            status = key_status(dc, v.key) if fresh else UNKNOWN
-            boxes.append(BoxStatus(t, status, dc.checked_at if fresh else None))
+            edited = bool(fresh and v.updated_at and v.updated_at > dc.checked_at)
+            status = UNKNOWN if (edited or not fresh) else key_status(dc, v.key)
+            boxes.append(BoxStatus(t, status, dc.checked_at if fresh else None, edited))
 
         v.sync = boxes
         v.total_n = len(boxes)

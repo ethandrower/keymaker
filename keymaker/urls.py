@@ -22,6 +22,7 @@ urlpatterns = [
     path("environments/<slug:slug>/variables/<int:var_id>/reveal", views.variable_reveal, name="variable_reveal"),
 
     # Sync actions against the boxes (admin): adopt on-box keys, ignore them, push ours out
+    path("environments/<slug:slug>/sync/check", views.environment_check, name="environment_check"),
     path("environments/<slug:slug>/sync/adopt", views.variables_adopt, name="variables_adopt"),
     path("environments/<slug:slug>/sync/ignore", views.variables_ignore, name="variables_ignore"),
     path("environments/<slug:slug>/sync/ignore/<int:ignored_id>/undo",
@@ -38,7 +39,6 @@ urlpatterns = [
 
     # Audit
     path("checks/", views.checks, name="checks"),
-    path("checks/run", views.checks_run, name="checks_run"),
     path("audit/", views.audit_log, name="audit_log"),
 
     # Agent/client API

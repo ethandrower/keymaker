@@ -174,3 +174,29 @@ tr.revoked { opacity: .5; }
 .login-body { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
 .login-card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 36px; width: 340px; text-align: center; }
 .login-card h1 { margin: 0 0 4px; }
+
+/* Environment actions menu: one button, everything you do *to* the environment. */
+.env-meta { display: flex; align-items: center; gap: 12px; white-space: nowrap; flex-shrink: 0; }
+.menu { position: relative; }
+.menu-items {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 20; min-width: 290px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  padding: 6px; box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
+}
+.menu-items a, .menu-items button {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 14px;
+  width: 100%; text-align: left; background: none; border: none; border-radius: 6px;
+  padding: 7px 10px; color: var(--text); font: inherit; cursor: pointer; white-space: nowrap;
+}
+.menu-items a:hover, .menu-items button:hover { background: var(--panel2); text-decoration: none; }
+.menu-items button.danger { color: var(--danger); }
+.menu-items form { margin: 0; }
+.menu-items hr { border: none; border-top: 1px solid var(--border); margin: 6px 0; }
+
+/* Per-target check state in the Targets table. */
+.badge.state-ok { color: var(--ok); border-color: var(--ok); }
+.badge.state-drift { color: var(--warn); border-color: var(--warn); cursor: help; }
+.badge.state-unknown { color: var(--muted); }
+.targets td .badge { margin-left: 0; margin-right: 6px; }
+.targets tr.selected td { background: rgba(79, 140, 255, .08); }
+.targets td.actions { white-space: nowrap; text-align: right; }

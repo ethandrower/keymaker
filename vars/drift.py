@@ -1,7 +1,7 @@
 """Shared drift-check logic — one target's live Dokku config vs. what Keymaker holds.
 
 Used by both the scheduled `drift_check` management command and the on-demand
-"Check now" buttons on the Checks page, so the two can never diverge. Reads a
+"Check" buttons on each environment page and the MCP, so they can never diverge. Reads a
 target's live config over SSH, compares against Keymaker's resolved values, and
 records a DriftCheck row (key NAMES only, never values).
 
@@ -195,7 +195,7 @@ def check_one(env, target, ssh_base, actor="drift-cron"):
 def run_checks(env, targets, actor, budget_s=22.0, connect_timeout=8):
     """Check a list of targets now, bounded by a wall-clock budget.
 
-    Shared by the Checks page, the environment page, and every write action
+    Shared by the environment page, the MCP, and every write action
     (adopt/push re-check the box they just touched, so the status a user sees
     afterwards is a fresh measurement rather than an optimistic assumption).
 

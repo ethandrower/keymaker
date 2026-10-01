@@ -43,7 +43,10 @@ so the list below it stays honest about what we chose to look away from.{% endco
       </table>
       {% if user.is_admin %}
         <div class="adopt-actions">
-          <button class="btn small primary" type="submit" :disabled="sel.length === 0"
+          <button class="btn small primary" type="submit" name="all" value="1"
+                  onclick="return confirm('Read all {{ adoptions|length }} value(s) off the box and store them in Keymaker?')"
+                  x-show="sel.length === 0">Store all {{ adoptions|length }} in Keymaker</button>
+          <button class="btn small primary" type="submit" x-show="sel.length > 0"
                   @click="if(!confirm('Read '+sel.length+' value(s) off the box and store them in Keymaker?')) $event.preventDefault()">
             Store in Keymaker <span x-show="sel.length" x-text="'('+sel.length+')'"></span>
           </button>
