@@ -149,8 +149,12 @@ def adopt(env, actor, keys=None, view_target=None, all_keys=False):
     """Take keys that exist on a box into Keymaker, reading their live values.
 
     Drift checks carry key names only, so this is the one path that fetches a
-    value from a server. A key seen on every box becomes one all-targets value;
-    otherwise it becomes an override for the box it was read from.
+    value from a server. Every box that has the key is read. When the key is on
+    all of them *and they agree*, it becomes one all-targets value; otherwise
+    each box gets its own override holding its own value. Two servers that
+    happen to share a key name (production's SECRET_KEY and staging's) must
+    never be collapsed into one value, because the next push would then
+    overwrite one server's secret with the other's.
     """
     _, _, _, adoptions = sync_state(env, view_target)
     wanted = None if all_keys else set(keys or [])
@@ -161,40 +165,46 @@ def adopt(env, actor, keys=None, view_target=None, all_keys=False):
     if not rows:
         return result
 
-    by_source = {}
+    # One SSH read per box, however many keys it contributes.
+    needed = {}
     for r in rows:
-        by_source.setdefault(r["source_target_id"], []).append(r)
-    targets = {t.id: t for t in env.targets.all()}
-
-    ssh_base, tmp = drift.build_ssh_base(connect_timeout=8)
-    touched = set()
+        for box in r["boxes"]:
+            needed.setdefault(box.id, (box, []))[1].append(r["key"])
+    live, ssh_base, tmp = {}, *drift.build_ssh_base(connect_timeout=8)
     try:
-        for target_id, group in by_source.items():   # one SSH read per box
-            box = targets[target_id]
+        for box, box_keys in needed.values():
             try:
-                live = drift.read_values(ssh_base, box.host, box.dokku_app,
-                                         [r["key"] for r in group])
+                live[box.id] = drift.read_values(ssh_base, box.host, box.dokku_app, box_keys)
             except _BOX_ERRORS as exc:
                 result["errors"].append(f"{box.label}: {str(exc)[:200]}")
-                continue
-            for r in group:
-                if r["key"] not in live:
-                    result["gone_from_box"].append(r["key"])  # never invent a value
-                    continue
-                scope = targets.get(r["adopt_target_id"]) if r["adopt_target_id"] else None
-                var = Variable(environment=env, key=r["key"], is_secret=True,
-                               target=scope, updated_by=actor)
-                var.set_value(live[r["key"]])
-                var.save()
-                result["adopted"].append({"key": r["key"], "scope": r["adopt_scope"],
-                                          "read_from": box.label})
-                touched.add(box)
-                AuditLog.record(actor=actor, action="adopt", environment=env.slug,
-                                key=r["key"],
-                                detail=f"read from {box.label} [{r['adopt_scope']}]")
     finally:
         if tmp:
             os.unlink(tmp)
+
+    def store(key, value, scope, read_from):
+        var = Variable(environment=env, key=key, is_secret=True, target=scope, updated_by=actor)
+        var.set_value(value)
+        var.save()
+        label = scope.label if scope else "all targets"
+        result["adopted"].append({"key": key, "scope": label, "read_from": read_from})
+        AuditLog.record(actor=actor, action="adopt", environment=env.slug, key=key,
+                        detail=f"read from {read_from} [{label}]")
+
+    touched = set()
+    for r in rows:
+        readable = [b for b in r["boxes"] if b.id in live]
+        found = [(b, live[b.id][r["key"]]) for b in readable if r["key"] in live[b.id]]
+        if not found:
+            if readable:                      # we looked, and it is no longer there
+                result["gone_from_box"].append(r["key"])
+            continue
+        everywhere = r["adopt_target_id"] == "" and len(found) == len(r["boxes"])
+        if everywhere and len({value for _, value in found}) == 1:
+            store(r["key"], found[0][1], None, ", ".join(b.label for b, _ in found))
+        else:
+            for box, value in found:          # differing or partial: one override per box
+                store(r["key"], value, box, box.label)
+        touched.update(b for b, _ in found)
 
     if result["adopted"]:
         env.bump_revision()

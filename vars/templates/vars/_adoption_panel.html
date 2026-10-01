@@ -34,8 +34,9 @@ so the list below it stays honest about what we chose to look away from.{% endco
               <td class="key"><code>{{ a.key }}</code></td>
               <td>{% for b in a.boxes %}<span class="badge target">{{ b.label }}</span>{% endfor %}</td>
               <td class="muted small">
-                {% if a.adopt_target_id %}override for <code>{{ a.adopt_scope }}</code>
-                {% else %}one value for <code>all targets</code>{% endif %}
+                {% if a.boxes|length == 1 %}override for <code>{{ a.adopt_scope }}</code>
+                {% elif a.adopt_target_id %}one override per box
+                {% else %}one shared value if the boxes agree, else one per box{% endif %}
               </td>
             </tr>
           {% endfor %}

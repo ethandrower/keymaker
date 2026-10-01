@@ -1355,6 +1355,25 @@ class SyncActionTests(TestCase):
         self.assertEqual(v.target, self.tA)     # seen on one box -> an override
         self.assertTrue(v.is_secret)            # unknown provenance: mask by default
 
+    def test_adopt_never_collapses_two_boxes_differing_values_into_one(self):
+        """Production's SECRET_KEY and staging's share a name, not a value. One
+        shared value would let the next push overwrite one with the other."""
+        self._box(self.tA, {"SECRET_KEY": "prod-secret", "REGION": "eu"})
+        self._box(self.tB, {"SECRET_KEY": "staging-secret", "REGION": "eu"})
+        self._check("boxA", on_box_only=["SECRET_KEY", "REGION"])
+        self._check("boxB", on_box_only=["SECRET_KEY", "REGION"])
+        with self._sim():
+            self._post("adopt", all="1")
+        secrets = {v.scope_label: v.value for v in self.env.active_vars().filter(key="SECRET_KEY")}
+        self.assertEqual(secrets, {"boxA": "prod-secret", "boxB": "staging-secret"})
+        region = self.env.active_vars().get(key="REGION")       # they agree: one shared value
+        self.assertIsNone(region.target)
+        # ...and after the automatic re-check nothing is waiting to be pushed anywhere.
+        resp = self.client.get(f"/environments/{self.env.slug}/")
+        self.assertEqual(resp.context["pushable_n"], 0)
+        self.assertTrue(resp.context["summary"]["clean"])
+        self.assertEqual(self._read_box(self.tB)["SECRET_KEY"], "staging-secret")
+
     def test_adopt_skips_a_key_that_vanished_since_the_check(self):
         """Never invent a value: if the box no longer has it, store nothing."""
         self._box(self.tA, {})                  # gone since the check ran

@@ -168,8 +168,12 @@ def variables_adopt(request, slug):
     r = ops.adopt(env, _actor(request), keys=request.POST.getlist("key"),
                   view_target=view_target, all_keys=request.POST.get("all") == "1")
     if r["adopted"]:
-        messages.success(request, f"Stored {len(r['adopted'])} key(s) in Keymaker: "
-                                  + _names(a["key"] for a in r["adopted"]))
+        per_box = sorted({a["key"] for a in r["adopted"] if a["scope"] != "all targets"})
+        messages.success(request, f"Stored {len({a['key'] for a in r['adopted']})} key(s) in Keymaker: "
+                                  + _names({a["key"] for a in r["adopted"]}))
+        if per_box and len(env.targets.all()) > 1:
+            messages.info(request, f"{len(per_box)} kept as per-box overrides because the boxes "
+                                   f"don't share one value: {_names(per_box)}")
     elif not r["errors"]:
         messages.error(request, "Nothing to adopt — those keys are no longer reported on a box.")
     for e in r["errors"]:

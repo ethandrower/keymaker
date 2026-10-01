@@ -394,8 +394,9 @@ TOOLS = [
     {
         "name": "keymaker_adopt_variables",
         "description": "Take keys that exist on a server but not in Keymaker into Keymaker, reading "
-                       "their live values off the server. Read-only on the server. A key present on "
-                       "every server becomes one shared value; otherwise an override for that server.",
+                       "their live values off the server. Read-only on the server. A key that every "
+                       "server holds with the same value becomes one shared value; otherwise each "
+                       "server gets its own override, so differing values are never merged.",
         "inputSchema": {"type": "object", "properties": {
             "environment": _ENV,
             "keys": dict(_KEYS, description="Keys to adopt. Omit and pass all: true for every reported key."),
