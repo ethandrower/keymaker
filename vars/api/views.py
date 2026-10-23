@@ -9,8 +9,9 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from .. import credentials
 from ..exporters import render_dotenv
-from ..models import AuditLog, DriftCheck, Environment, Target, Variable
+from ..models import AuditLog, Credential, DriftCheck, Environment, Target, Variable
 
 
 class TargetNotFound(Exception):
@@ -132,6 +133,20 @@ class InventoryView(APIView):
             detail=f"{len(data['environments'])} environments",
         )
         return Response(data)
+
+
+class CredentialsView(APIView):
+    """Tracked credentials and when they expire. `?due=1` = only expiring or
+    expired — what a CI step or shell prompt polls to nag before a token lapses.
+    Names, dates and rotate links only, never values."""
+
+    def get(self, request):
+        today = timezone.localdate()
+        if request.query_params.get("due") == "1":
+            creds = credentials.due(today)
+        else:
+            creds = Credential.objects.filter(archived=False)
+        return Response({"credentials": [credentials.describe(c, today) for c in creds]})
 
 
 class TargetsView(APIView):

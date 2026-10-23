@@ -34,7 +34,7 @@ def resolved_variables(env, view_target=None):
     the target's own overrides shadowing matching base keys, and other targets'
     overrides hidden.
     """
-    variables = list(env.active_vars())
+    variables = list(env.active_vars().select_related("target", "credential"))
     if not view_target:
         return variables
     override_keys = {v.key for v in variables if v.target_id == view_target.id}

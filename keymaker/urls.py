@@ -37,6 +37,15 @@ urlpatterns = [
     path("environments/<slug:slug>/targets/save", views.target_save, name="target_save"),
     path("environments/<slug:slug>/targets/<int:target_id>/delete", views.target_delete, name="target_delete"),
 
+    # Credentials that expire (tokens tracked for rotation)
+    path("credentials/", views.credential_list, name="credential_list"),
+    path("credentials/new", views.credential_new, name="credential_new"),
+    path("credentials/<int:cred_id>/", views.credential_detail, name="credential_detail"),
+    path("credentials/<int:cred_id>/link", views.credential_link, name="credential_link"),
+    path("credentials/<int:cred_id>/unlink/<int:var_id>", views.credential_unlink, name="credential_unlink"),
+    path("credentials/<int:cred_id>/rotate", views.credential_rotate, name="credential_rotate"),
+    path("credentials/<int:cred_id>/archive", views.credential_archive, name="credential_archive"),
+
     # Audit
     path("checks/", views.checks, name="checks"),
     path("audit/", views.audit_log, name="audit_log"),

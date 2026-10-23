@@ -71,6 +71,8 @@ docker compose exec web python manage.py test vars
 | `DATABASE_URL` | Postgres connection string |
 | `KEYMAKER_BASE_URL` | Public URL, used as the CSRF trusted origin in production |
 | `KEYMAKER_MANAGED_KEYS` | Keys never synced/edited (default `DATABASE_URL,REDIS_URL`) |
+| `KEYMAKER_SLACK_WEBHOOK_URL` | Incoming webhook for credential expiry alerts (or use the two below) |
+| `KEYMAKER_SLACK_BOT_TOKEN` / `KEYMAKER_SLACK_CHANNEL` | Bot token + channel id for expiry alerts via `chat.postMessage` |
 
 ## Auth — one key
 
@@ -98,6 +100,31 @@ Variables are **soft-deleted**: archiving records who/when/why and hides the key
 from the active list, exports, and sync — but keeps the encrypted value. Each
 environment page has an expandable **Archived** section to review and **Restore**.
 Nothing is ever hard-deleted, so a mistaken removal is always recoverable.
+
+## Credential expiry
+
+Tokens that expire (Atlassian API tokens, Bitbucket repo/project/workspace
+access tokens, GitHub PATs) are tracked as **credentials** on the **Expiry**
+page. A credential is the issued token, not a copy of it: it carries the expiry
+date, the **page to rotate it at**, the **scopes** to tick when re-issuing,
+whose account issued it, and where else it lives outside Keymaker (pipeline
+variables, `~/.trinity/config.yaml`). It stores no value of its own.
+
+- **Link the copies.** Variables holding the token are linked to it. Start from
+  the ⏱ next to any variable: Keymaker finds every other variable holding the
+  same value, across environments, and offers to link them too.
+- **Rotate once.** After re-issuing the token, paste the new value into *Record
+  a rotation*: it is written to every linked variable (optionally pushed to the
+  servers with `--no-restart`), and the next expiry is set from the token's
+  lifetime. The copies outside Keymaker are listed for you to update by hand.
+- **Warnings.** Linked variables show an expiry chip, the nav shows a count of
+  expiring/expired credentials, and `manage.py credential_alerts` (daily cron,
+  07:30 UTC) posts a Slack digest when a credential enters its warn window
+  (default 14 days), 7 days, 1 day, or expires, then re-reminds weekly while
+  expired. Quiet days post nothing. Configure `KEYMAKER_SLACK_WEBHOOK_URL`, or
+  `KEYMAKER_SLACK_BOT_TOKEN` + `KEYMAKER_SLACK_CHANNEL`.
+- **Agents.** MCP tools `keymaker_list_credentials`, `keymaker_save_credential`,
+  `keymaker_rotate_credential`; REST `GET /api/v1/credentials?due=1`.
 
 ## API (for agents & the sync client)
 

@@ -1,5 +1,6 @@
 """UI views (server-rendered + HTMX). Session-authed via AppUser."""
 import functools
+from datetime import timedelta
 
 from django.conf import settings
 from django.contrib import messages
@@ -9,8 +10,8 @@ from django.utils import timezone
 from django.utils.text import slugify
 from django.views.decorators.http import require_POST
 
-from . import auth, exporters, ops, sync
-from .models import AuditLog, Environment, IgnoredKey, Target, Variable
+from . import auth, credentials, exporters, ops, sync
+from .models import AuditLog, Credential, Environment, IgnoredKey, Target, Variable
 
 
 # --- decorators -----------------------------------------------------------
@@ -554,3 +555,155 @@ def audit_log(request):
         "vars/audit.html",
         {"environments": _nav_environments(), "logs": logs, "user": request.appuser},
     )
+
+
+# --- credentials (expiry tracking) ----------------------------------------
+# Thin wrappers over vars/credentials.py, shared with the MCP server and the
+# daily credential_alerts job.
+
+def _credential_context(request, cred=None, form=None, prefill_var=None):
+    today = timezone.localdate()
+    linked = credentials.linked(cred) if cred else ([prefill_var] if prefill_var else [])
+    if cred:
+        copies = credentials.copies(cred)
+    elif prefill_var:
+        copies = [v for v in credentials.copies(value=prefill_var.value) if v.id != prefill_var.id]
+    else:
+        copies = []
+    linked_ids = {v.id for v in linked}
+    return {
+        "environments": _nav_environments(), "user": request.appuser,
+        "cred": cred, "form": form or {}, "today": today,
+        "status": credentials.status(cred, today) if cred else None,
+        "when": credentials.when_text(cred, today) if cred else "",
+        "providers": credentials.PROVIDERS,
+        "linked": linked, "copies": copies, "prefill_var": prefill_var,
+        "var_refs": [credentials.var_ref(v) for v in
+                     Variable.objects.filter(archived=False, is_managed=False, environment__archived=False)
+                     .select_related("environment", "target").order_by("environment__slug", "key")
+                     if v.id not in linked_ids],
+        "suggested_expiry": (today + timedelta(days=cred.lifetime_days)).isoformat()
+                            if cred and cred.lifetime_days else "",
+    }
+
+
+@login_required
+def credential_list(request):
+    today = timezone.localdate()
+    show_archived = request.GET.get("archived") == "1"
+    rows = []
+    for c in Credential.objects.filter(archived=show_archived).prefetch_related("variables"):
+        rows.append({"cred": c, "status": credentials.status(c, today),
+                     "when": credentials.when_text(c, today),
+                     "provider": credentials.PROVIDERS.get(c.provider, {}).get("label", ""),
+                     "n_vars": sum(1 for v in c.variables.all() if not v.archived)})
+    return render(request, "vars/credentials.html", {
+        "environments": _nav_environments(), "user": request.appuser, "rows": rows,
+        "show_archived": show_archived,
+        "slack_configured": bool(settings.KEYMAKER_SLACK_WEBHOOK_URL
+                                 or (settings.KEYMAKER_SLACK_BOT_TOKEN and settings.KEYMAKER_SLACK_CHANNEL)),
+    })
+
+
+@admin_required
+def credential_new(request):
+    if request.method == "POST":
+        try:
+            cred = credentials.save(_actor(request), request.POST)
+        except credentials.CredentialError as exc:
+            messages.error(request, str(exc))
+            return render(request, "vars/credential_detail.html",
+                          _credential_context(request, form=request.POST))
+        link_ids = [i for i in request.POST.getlist("link_var") if i.isdigit()]
+        credentials.link(cred, _actor(request), Variable.objects.filter(id__in=link_ids, archived=False))
+        messages.success(request, f"Tracking {cred.name} ({credentials.when_text(cred)}).")
+        return redirect("credential_detail", cred_id=cred.id)
+
+    prefill_var = None
+    if (request.GET.get("var") or "").isdigit():
+        prefill_var = (Variable.objects.filter(id=request.GET["var"], archived=False)
+                       .select_related("environment", "target").first())
+    form = {"name": prefill_var.key if prefill_var else ""}
+    return render(request, "vars/credential_detail.html",
+                  _credential_context(request, form=form, prefill_var=prefill_var))
+
+
+@login_required
+def credential_detail(request, cred_id):
+    cred = get_object_or_404(Credential, id=cred_id)
+    if request.method == "POST":
+        if not request.appuser.is_admin:
+            return HttpResponseForbidden("Admin access required")
+        try:
+            credentials.save(_actor(request), request.POST, cred=cred)
+            messages.success(request, f"Saved {cred.name}.")
+        except credentials.CredentialError as exc:
+            messages.error(request, str(exc))
+        return redirect("credential_detail", cred_id=cred.id)
+    form = {f: getattr(cred, f) for f in credentials.FIELDS}
+    form.update(issued_on=cred.issued_on.isoformat() if cred.issued_on else "",
+                expires_on=cred.expires_on.isoformat() if cred.expires_on else "",
+                lifetime_days=cred.lifetime_days or "", warn_days=cred.warn_days)
+    return render(request, "vars/credential_detail.html", _credential_context(request, cred, form))
+
+
+@admin_required
+@require_POST
+def credential_link(request, cred_id):
+    cred = get_object_or_404(Credential, id=cred_id)
+    variables = list(Variable.objects.filter(
+        id__in=[i for i in request.POST.getlist("link_var") if i.isdigit()], archived=False))
+    for ref in filter(None, (r.strip() for r in request.POST.get("ref", "").split(","))):
+        try:
+            variables.append(credentials.resolve_ref(ref))
+        except credentials.CredentialError as exc:
+            messages.error(request, str(exc))
+    done = credentials.link(cred, _actor(request), variables)
+    if done:
+        messages.success(request, f"Linked {_names(done)}.")
+    return redirect("credential_detail", cred_id=cred.id)
+
+
+@admin_required
+@require_POST
+def credential_unlink(request, cred_id, var_id):
+    cred = get_object_or_404(Credential, id=cred_id)
+    credentials.unlink(cred, _actor(request), get_object_or_404(Variable, id=var_id))
+    return redirect("credential_detail", cred_id=cred.id)
+
+
+@admin_required
+@require_POST
+def credential_rotate(request, cred_id):
+    cred = get_object_or_404(Credential, id=cred_id, archived=False)
+    try:
+        r = credentials.rotate(cred, _actor(request), value=request.POST.get("value") or None,
+                               expires_on=request.POST.get("expires_on") or None,
+                               push=request.POST.get("push") == "on")
+    except credentials.CredentialError as exc:
+        messages.error(request, str(exc))
+        return redirect("credential_detail", cred_id=cred.id)
+    msg = f"Rotated {cred.name}: next expiry {r['expires_on']}."
+    if r["updated"]:
+        msg += f" New value written to {_names(r['updated'])}."
+    messages.success(request, msg)
+    for box, keys in r["pushed"].items():
+        messages.success(request, f"Sent {_names(keys)} to {box} (--no-restart).")
+    for e in r["push_errors"]:
+        messages.error(request, f"Couldn't push {e}")
+    if r["also_update"]:
+        messages.warning(request, f"Also update the copies outside Keymaker: {r['also_update']}")
+    return redirect("credential_detail", cred_id=cred.id)
+
+
+@admin_required
+@require_POST
+def credential_archive(request, cred_id):
+    cred = get_object_or_404(Credential, id=cred_id)
+    if cred.archived:
+        credentials.restore(cred, _actor(request))
+        messages.success(request, f"Restored {cred.name}.")
+    else:
+        credentials.archive(cred, _actor(request))
+        messages.success(request, f"Archived {cred.name}; it no longer alerts.")
+    return redirect("credential_detail", cred_id=cred.id)

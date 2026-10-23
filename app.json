@@ -5,6 +5,10 @@
     {
       "command": "python manage.py drift_check",
       "schedule": "0 7 * * *"
+    },
+    {
+      "command": "python manage.py credential_alerts",
+      "schedule": "30 7 * * *"
     }
   ]
 }

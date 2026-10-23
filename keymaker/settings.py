@@ -33,6 +33,12 @@ KEYMAKER_BASE_URL = os.environ.get("KEYMAKER_BASE_URL", "http://localhost:8000")
 # Keys that Dokku manages itself — never synced, flagged read-only in the UI.
 KEYMAKER_MANAGED_KEYS = _env_list("KEYMAKER_MANAGED_KEYS", "DATABASE_URL,REDIS_URL")
 
+# Credential expiry alerts (manage.py credential_alerts). An incoming webhook, or
+# a bot token + channel. Unset = alerts show in the UI only.
+KEYMAKER_SLACK_WEBHOOK_URL = os.environ.get("KEYMAKER_SLACK_WEBHOOK_URL", "")
+KEYMAKER_SLACK_BOT_TOKEN = os.environ.get("KEYMAKER_SLACK_BOT_TOKEN", "")
+KEYMAKER_SLACK_CHANNEL = os.environ.get("KEYMAKER_SLACK_CHANNEL", "")
+
 INSTALLED_APPS = [
     "django.contrib.auth",
     "django.contrib.contenttypes",
