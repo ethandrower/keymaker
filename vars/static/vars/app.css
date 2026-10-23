@@ -200,3 +200,35 @@ tr.revoked { opacity: .5; }
 .targets td .badge { margin-left: 0; margin-right: 6px; }
 .targets tr.selected td { background: rgba(79, 140, 255, .08); }
 .targets td.actions { white-space: nowrap; text-align: right; }
+
+/* Credential expiry: tokens tracked for rotation. */
+.nav-count { background: var(--danger); color: #fff; border-radius: 999px; padding: 0 6px; font-size: 11px; font-weight: 600; }
+.badge.cred-ok { color: var(--ok); border-color: var(--ok); }
+.badge.cred-expiring { color: var(--warn); border-color: var(--warn); }
+.badge.cred-expired { color: #fff; background: var(--danger); border-color: var(--danger); }
+.badge.cred-no_expiry, .badge.cred-archived { color: var(--muted); }
+a.badge { text-decoration: none; }
+.badge[class*="cred-"] { text-transform: none; font-size: 11px; }
+.cred-table td.nowrap, .nowrap { white-space: nowrap; }
+.cred-table .badge { margin-left: 0; }
+.cred-row.expired td { background: rgba(255, 93, 93, .06); }
+.scopes-cell { max-width: 260px; }
+.track-expiry { opacity: 0; font-size: 12px; text-decoration: none; }
+.vars-table tr:hover .track-expiry { opacity: .7; }
+.rotate-panel, .cred-form, .cred-links {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  padding: 12px 16px; margin-bottom: 16px;
+}
+.rotate-panel h3, .cred-form h3, .cred-links h3 { margin: 0 0 10px; font-size: 14px; }
+.rotate-scopes pre { margin: 4px 0 0; white-space: pre-wrap; font-size: 13px; }
+.form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px 14px; margin-bottom: 12px; }
+.form-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.form-grid label.wide { grid-column: 1 / -1; }
+.form-grid input, .form-grid select, .form-grid textarea { color: var(--text); }
+textarea { background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; font: inherit; }
+.quick-dates { display: flex; gap: 8px; }
+.inline-form input[type=checkbox] { min-width: 0; }
+.copy-list { list-style: none; padding: 0; margin: 4px 0 8px; }
+.copy-list li { margin: 3px 0; }
+.copies-panel { margin-top: 12px; }
+.archive-form { margin-top: 14px; text-align: right; }

@@ -102,6 +102,10 @@ class Variable(models.Model):
     # Free-text label for visually sectioning variables within an environment
     # (e.g. "Django app", "Mail", "Scraping"). Blank = unlabeled.
     label = models.CharField(max_length=80, blank=True)
+    # The issued token this value is a copy of, when it is one we track for expiry.
+    credential = models.ForeignKey(
+        "Credential", null=True, blank=True, on_delete=models.SET_NULL, related_name="variables",
+    )
     updated_by = models.CharField(max_length=150, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -223,6 +227,50 @@ class IgnoredKey(models.Model):
     @property
     def scope_label(self) -> str:
         return self.target_label or "All targets"
+
+
+class Credential(models.Model):
+    """An issued token or key that expires: the thing you have to go and rotate.
+
+    One Atlassian API token is routinely pasted into several env vars, a
+    Bitbucket pipeline and somebody's ~/.trinity/config.yaml. Expiry belongs to
+    the token, not to each copy, so it is tracked once here. Copies Keymaker
+    holds are linked as Variables; copies it doesn't hold are named in
+    `used_in`. Stores no secret value of its own.
+    """
+
+    name = models.CharField(max_length=160)
+    provider = models.CharField(max_length=40, blank=True)   # key into credentials.PROVIDERS
+    owner = models.CharField(max_length=150, blank=True, help_text="Whose account issued it")
+    rotate_url = models.URLField(max_length=500, blank=True, help_text="Page where it is regenerated")
+    scopes = models.TextField(blank=True, help_text="Scopes / permissions to tick when re-issuing")
+    used_in = models.TextField(blank=True, help_text="Places outside Keymaker that hold a copy")
+    notes = models.TextField(blank=True)
+    issued_on = models.DateField(null=True, blank=True)
+    expires_on = models.DateField(null=True, blank=True, help_text="Blank = does not expire")
+    lifetime_days = models.PositiveIntegerField(
+        null=True, blank=True, help_text="Lifetime of a re-issued token; pre-fills the next expiry")
+    warn_days = models.PositiveIntegerField(default=14)
+    # Which alert stage was last announced, so the daily job posts on change, not every day.
+    alerted_stage = models.CharField(max_length=16, blank=True)
+    alerted_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.CharField(max_length=150, blank=True)
+    archived = models.BooleanField(default=False)
+    archived_at = models.DateTimeField(null=True, blank=True)
+    archived_by = models.CharField(max_length=150, blank=True)
+
+    class Meta:
+        ordering = [models.F("expires_on").asc(nulls_last=True), "name"]
+
+    def __str__(self):
+        return self.name
+
+    def days_left(self, today=None):
+        if self.expires_on is None:
+            return None
+        return (self.expires_on - (today or timezone.localdate())).days
 
 
 class AuditLog(models.Model):

@@ -22,6 +22,7 @@
     <nav class="topnav">
       <a href="{% url 'compare' %}">Compare</a>
       <a href="{% url 'cleanup' %}">Cleanup</a>
+      <a href="{% url 'credential_list' %}">Expiry{% if credentials_due %} <span class="nav-count" title="{{ credentials_due }} credential(s) expiring or expired">{{ credentials_due }}</span>{% endif %}</a>
       <a href="{% url 'audit_log' %}">Audit</a>
     </nav>
     <div class="spacer"></div>

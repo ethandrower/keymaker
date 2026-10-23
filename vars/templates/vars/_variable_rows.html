@@ -6,6 +6,7 @@ than no status column at all.
 `variables` is ordered by (label, key) so each label forms one contiguous
 {% regroup %} group. Keys that exist only on a box are NOT here — they have no
 value to show and live in the adoption panel above the table.{% endcomment %}
+{% load credential_tags %}
 <tbody id="var-rows">
   {% regroup variables by label as grouped %}
   {% for grp in grouped %}
@@ -27,6 +28,12 @@ value to show and live in the adoption panel above the table.{% endcomment %}
           {% if v.is_managed %}<span class="badge managed">managed</span>{% endif %}
           {% if v.is_secret %}<span class="badge secret">secret</span>{% endif %}
           {% if v.suspected_unused %}<span class="badge unused" title="{{ v.audit_note }} — last seen {{ v.last_seen_at|default:'never' }}">⚠ unused?</span>{% endif %}
+          {% if v.credential_id and not v.credential.archived %}
+            <a href="{% url 'credential_detail' v.credential_id %}" class="badge cred-{{ v.credential|cred_status }}"
+               title="{{ v.credential.name }}{% if v.credential.expires_on %}: {{ v.credential.expires_on|date:'j M Y' }}{% endif %}">⏱ {{ v.credential|cred_when }}</a>
+          {% elif user.is_admin and not v.is_managed %}
+            <a href="{% url 'credential_new' %}?var={{ v.id }}" class="icon-btn track-expiry" title="Track when this token expires">⏱</a>
+          {% endif %}
         </td>
         <td class="value">
           {% if v.is_secret %}

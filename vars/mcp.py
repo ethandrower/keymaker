@@ -18,13 +18,14 @@ import logging
 
 from django.conf import settings
 from django.http import HttpResponse, JsonResponse
+from django.utils import timezone
 from django.utils.text import slugify
 from django.views.decorators.csrf import csrf_exempt
 
 from .auth import check_key
 from .api.views import TargetNotFound, _resolve_target, build_inventory
-from . import ops
-from .models import AuditLog, Environment, Target, Variable
+from . import credentials, ops
+from .models import AuditLog, Credential, Environment, Target, Variable
 
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_INFO = {"name": "keymaker", "title": "Keymaker", "version": "2"}
@@ -262,6 +263,52 @@ def _tool_save_target(args):
                      else "Not comparable until it has both a host and a dokku_app.")}
 
 
+def _get_credential(args):
+    ident = args.get("credential")
+    if ident in (None, ""):
+        raise ValueError("credential (id or exact name) is required.")
+    qs = Credential.objects.all()
+    cred = qs.filter(id=ident).first() if str(ident).isdigit() else qs.filter(name=str(ident).strip()).first()
+    if cred is None:
+        names = ", ".join(qs.filter(archived=False).values_list("name", flat=True)) or "none"
+        raise ValueError(f"No credential '{ident}'. Credentials: {names}.")
+    return cred
+
+
+def _tool_list_credentials(args):
+    today = timezone.localdate()
+    creds = credentials.due(today) if args.get("due_only") else Credential.objects.filter(archived=False)
+    return {"credentials": [credentials.describe(c, today) for c in creds],
+            "status_meanings": credentials.LABELS}
+
+
+def _tool_save_credential(args):
+    cred = _get_credential(args) if args.get("credential") not in (None, "") else None
+    data = {k: args[k] for k in (*credentials.FIELDS, "issued_on", "expires_on",
+                                 "lifetime_days", "warn_days") if k in args}
+    try:
+        variables = [credentials.resolve_ref(r) for r in (args.get("link") or [])]
+        cred = credentials.save(MCP_ACTOR, data, cred=cred)
+    except credentials.CredentialError as exc:
+        raise ValueError(str(exc))
+    linked = credentials.link(cred, MCP_ACTOR, variables)
+    out = credentials.describe(cred)
+    out["newly_linked"] = linked
+    out["same_value_elsewhere"] = [credentials.var_ref(v) for v in credentials.copies(cred)]
+    return out
+
+
+def _tool_rotate_credential(args):
+    cred = _get_credential(args)
+    if cred.archived:
+        raise ValueError(f"{cred.name} is archived.")
+    try:
+        return credentials.rotate(cred, MCP_ACTOR, value=args.get("value") or None,
+                                  expires_on=args.get("expires_on"), push=bool(args.get("push")))
+    except credentials.CredentialError as exc:
+        raise ValueError(str(exc))
+
+
 _TARGET_DESC = ("Server to scope to: its label, dokku_app, or id (see keymaker_inventory). "
                 "Omit for the environment as a whole / the all-targets base value.")
 _ENV = {"type": "string", "description": "Environment slug, e.g. 'staging'."}
@@ -444,6 +491,52 @@ TOOLS = [
             "required": ["environment", "label"]},
         "annotations": _WRITE, "handler": _tool_save_target,
     },
+    {
+        "name": "keymaker_list_credentials",
+        "description": "Tracked credentials (API tokens, access tokens) and when they expire: "
+                       "status, days left, the page to rotate each one at, the scopes it needs, "
+                       "which variables hold it and where else it lives. No values. Pass "
+                       "due_only to see just the expiring and expired ones.",
+        "inputSchema": {"type": "object", "properties": {
+            "due_only": {"type": "boolean", "default": False}}},
+        "annotations": _READ, "handler": _tool_list_credentials,
+    },
+    {
+        "name": "keymaker_save_credential",
+        "description": "Start tracking a credential's expiry, or update one (pass credential = its "
+                       "id or exact name; only the fields you pass change). link takes variable "
+                       "handles like 'staging:ATLASSIAN_API_TOKEN' or 'staging:KEY@dev-ethan'. The "
+                       "result lists other variables holding the same value so you can link them too.",
+        "inputSchema": {"type": "object", "properties": {
+            "credential": {"type": "string", "description": "Id or exact name, to update. Omit to create."},
+            "name": {"type": "string"},
+            "provider": {"type": "string", "enum": list(credentials.PROVIDERS)},
+            "owner": {"type": "string", "description": "Whose account issued it."},
+            "rotate_url": {"type": "string", "description": "Page where it is regenerated."},
+            "scopes": {"type": "string", "description": "Scopes/permissions to tick when re-issuing."},
+            "used_in": {"type": "string", "description": "Copies outside Keymaker (pipelines, laptops)."},
+            "notes": {"type": "string"},
+            "issued_on": {"type": "string", "description": "YYYY-MM-DD"},
+            "expires_on": {"type": "string", "description": "YYYY-MM-DD; empty = does not expire."},
+            "lifetime_days": {"type": "integer"},
+            "warn_days": {"type": "integer", "default": 14},
+            "link": {"type": "array", "items": {"type": "string"}}}},
+        "annotations": _WRITE, "handler": _tool_save_credential,
+    },
+    {
+        "name": "keymaker_rotate_credential",
+        "description": "Record that a credential was re-issued. Sets the new expiry (expires_on, "
+                       "or today + its lifetime) and, given value, writes the new token into every "
+                       "linked variable. push: true also sends those to their servers with "
+                       "--no-restart. Copies outside Keymaker (used_in) are returned for you to update.",
+        "inputSchema": {"type": "object", "properties": {
+            "credential": {"type": "string", "description": "Id or exact name."},
+            "value": {"type": "string", "description": "The new token. Omit to record the date only."},
+            "expires_on": {"type": "string", "description": "YYYY-MM-DD"},
+            "push": {"type": "boolean", "default": False}},
+            "required": ["credential"]},
+        "annotations": _BOX_WRITE, "handler": _tool_rotate_credential,
+    },
 ]
 
 INSTRUCTIONS = (
@@ -459,7 +552,11 @@ INSTRUCTIONS = (
     "Typical flows — discover: keymaker_inventory, keymaker_find_key. Read: "
     "keymaker_get_variables. Add a var for a feature: keymaker_set_variable with push: true, "
     "scoped with target for one developer's box. Reconcile a server: keymaker_check_drift, then "
-    "adopt / push / ignore, then read the returned status."
+    "adopt / push / ignore, then read the returned status.\n"
+    "Tokens that expire are tracked as credentials: keymaker_list_credentials (due_only) shows "
+    "what needs rotating and where; after re-issuing one, keymaker_rotate_credential with the new "
+    "value updates every variable that holds it. When you store a token with an expiry, register "
+    "it with keymaker_save_credential."
 )
 
 _TOOLS_BY_NAME = {t["name"]: t for t in TOOLS}
